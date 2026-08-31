@@ -290,6 +290,12 @@ class ChannelGateway:
             return
 
         fallback = record.session.fallback_chat_model_config
+        knowledge_config = None
+        raw_kc = getattr(record.session, "knowledge_config", None)
+        if isinstance(raw_kc, dict) and raw_kc.get("knowledge_base_ids"):
+            from ..storage._model._session import SessionKnowledgeConfig
+
+            knowledge_config = SessionKnowledgeConfig.model_validate(raw_kc)
         session_config = SessionConfig(
             workspace_id=await self._workspace_manager.assign_workspace_id(
                 user_id=record.user_id,
@@ -302,6 +308,7 @@ class ChannelGateway:
             fallback_chat_model_config=(
                 ChatModelConfig(**fallback) if fallback else None
             ),
+            knowledge_config=knowledge_config,
             name=self._session_name(record, event, scope),
         )
         initial_state = AgentState(

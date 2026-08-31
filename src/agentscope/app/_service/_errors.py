@@ -36,26 +36,42 @@ _NETWORK_EXC_NAMES: frozenset[str] = frozenset(
 
 _GENERIC_MESSAGE: dict[ErrorType, str] = {
     ErrorType.AUTHENTICATION: (
-        "Authentication failed — check the model's API key / credential."
+        "抱歉，我连不上对话模型——身份认证没有通过。"
+        "请管理员检查模型 API Key / 凭据是否配置正确、是否过期。"
     ),
     ErrorType.PERMISSION: (
-        "Request not allowed — the credential lacks permission for this "
-        "model or endpoint."
+        "抱歉，当前凭据没有权限调用这个模型或接口。"
+        "请管理员检查模型网关权限与路由配置。"
     ),
-    ErrorType.RATE_LIMIT: "Rate limit or quota exceeded — try again later.",
+    ErrorType.RATE_LIMIT: (
+        "抱歉，模型调用太频繁或额度用尽了。"
+        "请稍等一会儿再发一条消息给我；若持续出现，请管理员检查配额。"
+    ),
     ErrorType.INVALID_REQUEST: (
-        "The request to the model was rejected as invalid."
+        "抱歉，发给模型的请求被拒绝了（参数或内容不符合要求）。"
+        "你可以换种说法再试；若一直失败，请管理员检查模型与提示配置。"
     ),
-    ErrorType.UPSTREAM: "The upstream model service returned an error.",
+    ErrorType.UPSTREAM: (
+        "抱歉，上游模型服务返回了错误。"
+        "请稍后再试；若持续失败，请管理员查看模型服务商状态与运行时日志。"
+    ),
     ErrorType.CONNECTION: (
-        "Could not reach the model service — network error or timeout."
+        "抱歉，我暂时连不上模型服务（网络异常或超时）。"
+        "请确认网络畅通后重试；管理员可检查模型 Endpoint 是否可达。"
     ),
-    ErrorType.INTERNAL: "An unexpected internal error occurred.",
+    ErrorType.INTERNAL: (
+        "抱歉，我内部出了点故障，这次没能完成回复。"
+        "请稍后再试；若一直如此，请管理员查看 agentscope-runtime 日志里的报错详情。"
+    ),
     ErrorType.SETUP: (
-        "The session could not be prepared — check the agent's model, "
-        "tools and knowledge bases."
+        "抱歉，我还没准备好开始工作（会话初始化失败）。"
+        "请确认数字员工已发布到运行时，或重启 agentscope-runtime 后再试；"
+        "管理员可检查模型路由、技能投影与 Redis 是否正常。"
     ),
-    ErrorType.UNKNOWN: "The reply failed with an unknown error.",
+    ErrorType.UNKNOWN: (
+        "抱歉，这次回复失败了，我还没定位到具体原因。"
+        "请再试一次；若重复出现，请管理员查看运行时错误日志。"
+    ),
 }
 
 
@@ -129,6 +145,14 @@ def _classify_type(e: Exception) -> ErrorType:
     return ErrorType.UNKNOWN
 
 
+def _safe_exc_detail(e: BaseException, limit: int = 240) -> str:
+    """Short, UI-safe exception summary (no stack; truncated)."""
+    text = f"{type(e).__name__}: {e}".replace("\n", " ").strip()
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
 def _classify_setup_error(e: Exception) -> ErrorInfo:
     """Classify a failure that happened before the agent replied.
 
@@ -147,11 +171,20 @@ def _classify_setup_error(e: Exception) -> ErrorInfo:
     """
     info = _classify_error(e)
     if info.type is ErrorType.UNKNOWN:
+        detail = _safe_exc_detail(e)
         return ErrorInfo(
             type=ErrorType.SETUP,
-            message=_GENERIC_MESSAGE[ErrorType.SETUP],
+            message=(
+                f"{_GENERIC_MESSAGE[ErrorType.SETUP]}\n\n"
+                f"（内部原因：{detail}）"
+            ),
         )
-    return info
+    # Known types still benefit from a short hint when setup failed early.
+    detail = _safe_exc_detail(e)
+    return ErrorInfo(
+        type=info.type,
+        message=f"{info.message}\n\n（内部原因：{detail}）",
+    )
 
 
 def _classify_error(e: Exception) -> ErrorInfo:

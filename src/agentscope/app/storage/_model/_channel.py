@@ -124,6 +124,11 @@ class SessionSettings(BaseModel):
     auto-denied. Any :class:`PermissionMode` is accepted — the engine
     resolves every mode server-side and the ASK path maps to the card."""
 
+    knowledge_config: dict[str, Any] | None = None
+    """Optional knowledge-base attachment for channel-created sessions
+    (``knowledge_base_ids`` + RAG ``parameters``). Copied into
+    :class:`~agentscope.app.storage.SessionConfig.knowledge_config`."""
+
     @field_validator("permission_mode")
     @classmethod
     def _validate_permission_mode(cls, v: str) -> str:

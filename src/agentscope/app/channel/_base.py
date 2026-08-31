@@ -14,6 +14,7 @@ connection loop.
 """
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
@@ -37,9 +38,13 @@ if TYPE_CHECKING:
     from ...tool import ToolBase
     from ...workspace import WorkspaceBase
 
-_NO_TEXT_REPLY = "(Agent returned no text content)"
+logger = logging.getLogger(__name__)
+
+_NO_TEXT_REPLY = "（我这边没有生成文字回复，可以再发一次试试。）"
 _AGENT_ERROR_REPLY = (
-    "❌ Agent encountered an error. Please check the agent configuration."
+    "抱歉，我刚才处理你的消息时出了点状况，暂时没法继续。"
+    "请稍后再试一次；如果连续失败，麻烦通知管理员查看运行时日志，"
+    "并确认我的模型凭据、技能是否已正常发布到 AgentScope。"
 )
 # Deserialize a bus event dict back into its typed AgentEvent.
 _EVENT_ADAPTER: TypeAdapter = TypeAdapter(AgentEvent)
@@ -378,7 +383,22 @@ class ChannelBase(ABC):
         # line between them or thinking runs into the text that follows.
         text = "\n\n".join(part for part in parts if part.strip()).strip()
         if reply.finished_reason == ReplyFinishedReason.ERROR:
-            text = text or _AGENT_ERROR_REPLY
+            if not text:
+                err = getattr(reply, "error", None)
+                text = (
+                    err.message
+                    if err is not None and getattr(err, "message", None)
+                    else _AGENT_ERROR_REPLY
+                )
+            # Surface the failure in server logs — Channel used to send a
+            # generic English stub with no stack / type, which made IM
+            # errors look "silent" in the runtime console.
+            logger.error(
+                "Agent reply finished with ERROR channel_render "
+                "finished_reason=%s error=%s",
+                reply.finished_reason,
+                getattr(reply, "error", None),
+            )
         elif not text and not data:
             text = _NO_TEXT_REPLY
         blocks: list[TextBlock | DataBlock] = (
