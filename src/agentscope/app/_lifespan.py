@@ -174,11 +174,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             custom_subagent_templates=app.state.custom_subagent_templates,
             custom_agent_cls=app.state.custom_agent_cls,
             channel_clients=channel_clients,
-            include_builtin_schedule_tools=getattr(
-                app.state,
-                "include_builtin_schedule_tools",
-                True,
-            ),
         )
         app.state.chat_service = chat_service
 

@@ -142,32 +142,6 @@ class DingTalkChannel(ChannelBase):
             description="Template variable key of the AI Card streaming "
             "component.",
         )
-        oa_event_webhook_url: str = Field(
-            default="",
-            title="OA event webhook URL",
-            description="When set, Stream OA events (e.g. "
-            "bpms_instance_change) are POSTed here so the platform can "
-            "update job approval status without polling.",
-        )
-        oa_event_service_token: str = Field(
-            default="",
-            title="OA event service token",
-            description="X-Service-Token for oa_event_webhook_url "
-            "(platform-backend /internal/*).",
-            json_schema_extra={"format": "password"},
-        )
-        oa_event_owner_user_id: str = Field(
-            default="",
-            title="OA event owner user id",
-            description="Optional tenant owner id "
-            "({tenantCode}:de:{employeeId}) forwarded with OA events.",
-        )
-        oa_event_agent_id: str = Field(
-            default="",
-            title="OA event agent id",
-            description="Optional digital-employee agent id forwarded "
-            "with OA events.",
-        )
 
     capabilities = ChannelCapability(
         text=True,
@@ -680,8 +654,6 @@ class DingTalkChannel(ChannelBase):
         channel = self
         on_callback = self._on_callback
         on_card_callback = self._on_card_callback
-        on_oa_event = self._on_oa_event
-        forward_oa = bool(str(self._config.oa_event_webhook_url or "").strip())
 
         class _StoppableStreamClient(
             dingtalk_stream.DingTalkStreamClient,
@@ -839,31 +811,6 @@ class DingTalkChannel(ChannelBase):
                     )
                 return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
-        class _OaEventHandler(dingtalk_stream.EventHandler):
-            """Forward Stream OA events to the platform webhook."""
-
-            async def process(self, event: Any) -> tuple[int, str]:
-                """Process one OA / org event from DingTalk Stream.
-
-                Args:
-                    event (`Any`): The Stream SDK event message.
-
-                Returns:
-                    `tuple[int, str]`: DingTalk acknowledgement status and
-                    message.
-                """
-                try:
-                    await on_oa_event(event)
-                except Exception:  # pylint: disable=broad-except
-                    logger.exception(
-                        "DingTalk '%s' OA event forward failed",
-                        channel.channel_id,
-                    )
-                    # Ack OK so DingTalk does not retry forever on our bugs;
-                    # platform logs already captured the failure.
-                    return dingtalk_stream.AckMessage.STATUS_OK, "OK"
-                return dingtalk_stream.AckMessage.STATUS_OK, "OK"
-
         credential = dingtalk_stream.Credential(
             self._client_id,
             self._client_secret,
@@ -871,84 +818,7 @@ class DingTalkChannel(ChannelBase):
         client = _StoppableStreamClient(credential)
         client.register_callback_handler(_CHATBOT_TOPIC, _MessageHandler())
         client.register_callback_handler(_CARD_CALLBACK_TOPIC, _CardHandler())
-        if forward_oa:
-            client.register_all_event_handler(_OaEventHandler())
         return client
-
-    async def _on_oa_event(self, event: Any) -> None:
-        """POST one Stream OA event to ``oa_event_webhook_url`` when configured.
-
-        Args:
-            event (`Any`): DingTalk Stream ``EventMessage`` (or compatible).
-        """
-        webhook = str(self._config.oa_event_webhook_url or "").strip()
-        if not webhook:
-            return
-
-        headers_obj = getattr(event, "headers", None)
-        event_type = str(getattr(headers_obj, "event_type", None) or "")
-        event_id = str(getattr(headers_obj, "event_id", None) or "")
-        event_corp_id = str(getattr(headers_obj, "event_corp_id", None) or "")
-        raw_data = getattr(event, "data", None)
-        data: dict[str, Any]
-        if isinstance(raw_data, dict):
-            data = raw_data
-        elif isinstance(raw_data, str) and raw_data.strip():
-            try:
-                parsed = json.loads(raw_data)
-                data = parsed if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
-                data = {}
-        else:
-            data = {}
-
-        # Only OA instance changes matter for recruiting approval sensing.
-        if event_type and event_type != "bpms_instance_change":
-            logger.debug(
-                "DingTalk '%s' ignoring Stream event_type=%s",
-                self._channel_id,
-                event_type,
-            )
-            return
-
-        payload = {
-            "appId": self._client_id,
-            "ownerUserId": str(self._config.oa_event_owner_user_id or ""),
-            "agentId": str(self._config.oa_event_agent_id or ""),
-            "eventType": event_type or "bpms_instance_change",
-            "eventId": event_id,
-            "eventCorpId": event_corp_id,
-            "data": data,
-        }
-        req_headers = {"Content-Type": "application/json"}
-        token = str(self._config.oa_event_service_token or "").strip()
-        if token:
-            req_headers["X-Service-Token"] = token
-
-        http = None
-        self._api()
-        http = self._http
-        if http is None:
-            http = self._new_http_client()
-            self._http = http
-        response = await http.post(webhook, headers=req_headers, json=payload)
-        if response.status_code >= 400:
-            logger.warning(
-                "DingTalk '%s' OA webhook HTTP %s: %s",
-                self._channel_id,
-                response.status_code,
-                response.text[:500],
-            )
-        else:
-            logger.info(
-                "DingTalk '%s' forwarded bpms_instance_change eventId=%s "
-                "instance=%s type=%s result=%s",
-                self._channel_id,
-                event_id,
-                data.get("processInstanceId"),
-                data.get("type"),
-                data.get("result"),
-            )
 
     async def _present_confirm(
         self,

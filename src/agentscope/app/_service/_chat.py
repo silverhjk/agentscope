@@ -125,7 +125,6 @@ class ChatService:
         custom_agent_cls: type[Agent] | None = None,
         extra_projectors: list[EventProjector] | None = None,
         channel_clients: "ChannelClients | None" = None,
-        include_builtin_schedule_tools: bool = True,
     ) -> None:
         """Initialize chat service.
 
@@ -219,7 +218,6 @@ class ChatService:
         self._channel_clients = channel_clients
         self._sub_agent_templates = custom_subagent_templates
         self._agent_cls = custom_agent_cls or Agent
-        self._include_builtin_schedule_tools = include_builtin_schedule_tools
         self._projection = SessionProjection(message_bus)
         self._projectors: list[EventProjector] = [
             SubagentHitlProjector(storage),
@@ -910,7 +908,6 @@ class ChatService:
                     sub_agent_templates=self._sub_agent_templates,
                     team_role=team_ctx.role if team_ctx else None,
                     channel_tools=channel_tools,
-                    include_schedule_tools=self._include_builtin_schedule_tools,
                 )
 
                 # -------------------------------------------------------------
@@ -996,23 +993,6 @@ class ChatService:
                     offloader=workspace,
                 )
 
-                # IM / chat UIs often cannot deliver UserConfirmResultEvent
-                # (no approval card). A fresh user Msg while parked on
-                # ASKING/SUBMITTED would otherwise raise ValueError in
-                # Agent._check_incoming_event → SETUP failure. Supersede
-                # the park so the new message can start a normal reply.
-                if isinstance(input_msg, (Msg, list)) and agent.state.has_awaiting_tool_calls(
-                    agent.name,
-                ):
-                    logger.warning(
-                        "Superseding parked HITL for session %s: new user "
-                        "message arrived while tool call(s) awaited "
-                        "confirmation or external results",
-                        session_id,
-                    )
-                    async for _ in agent._close_unfinished_tool_calls():
-                        pass
-
                 if self._skip_parked_wakeup(session_id, agent, input_msg):
                     return
             except Exception as e:  # pylint: disable=broad-except
@@ -1020,28 +1000,6 @@ class ChatService:
                 # to make: these events share a channel with a live reply's,
                 # so publishing them unserialised would drop a "reply failed"
                 # into the middle of an answer another run is streaming.
-                logger.exception(
-                    "Chat run assembly failed before reply start "
-                    "user_id=%s session_id=%s agent_id=%s error=%s",
-                    user_id,
-                    session_id,
-                    agent_id,
-                    e,
-                )
-                # Always dump to a fixed path so Debug/IM failures are
-                # visible even when logging handlers swallow stacks.
-                try:
-                    from pathlib import Path
-                    import traceback as _tb
-
-                    Path("/tmp/agentscope-chat-setup-error.txt").write_text(
-                        f"user_id={user_id}\nsession_id={session_id}\n"
-                        f"agent_id={agent_id}\nerror={e!r}\n\n"
-                        + _tb.format_exc(),
-                        encoding="utf-8",
-                    )
-                except Exception:  # pylint: disable=broad-except
-                    pass
                 await self._report_failure(
                     user_id,
                     session_id,

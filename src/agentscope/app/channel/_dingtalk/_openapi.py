@@ -48,9 +48,6 @@ class _DingTalkOpenAPI:
         self._token: str | None = None
         self._token_expires_at = 0.0
         self._token_lock = asyncio.Lock()
-        # Short-lived userid → unionid cache for Wiki operatorId resolution.
-        self._union_id_cache: dict[str, tuple[str, float]] = {}
-        self._union_id_ttl_seconds = 3600.0
 
     async def download_media(
         self,
@@ -512,30 +509,6 @@ class _DingTalkOpenAPI:
             logger.exception("DingTalk media upload failed")
             return None
 
-    async def get_user_union_id(self, user_id: str) -> str | None:
-        """Resolve enterprise ``userid`` to ``unionid`` (Wiki operatorId).
-
-        Results are cached briefly per OpenAPI client instance.
-        """
-        uid = (user_id or "").strip()
-        if not uid:
-            return None
-        cached = self._union_id_cache.get(uid)
-        now = time.monotonic()
-        if cached and now < cached[1]:
-            return cached[0]
-        token = await self._access_token()
-        if token is None:
-            return None
-        detail = await self._user_detail(token, uid)
-        union_id = str((detail or {}).get("union_id") or "").strip() or None
-        if union_id:
-            self._union_id_cache[uid] = (
-                union_id,
-                now + self._union_id_ttl_seconds,
-            )
-        return union_id
-
     async def _user_detail(
         self,
         token: str,
@@ -562,7 +535,6 @@ class _DingTalkOpenAPI:
                 "name": str(result.get("name") or ""),
                 "title": str(result.get("title") or ""),
                 "department_ids": result.get("dept_id_list") or [],
-                "union_id": str(result.get("unionid") or ""),
             }
         except Exception:  # pylint: disable=broad-except
             logger.exception("DingTalk user detail request failed")

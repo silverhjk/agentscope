@@ -98,7 +98,6 @@ def create_app(
     resource_access_policy: ResourceAccessPolicyBase | None = None,
     channels: list[Type[ChannelBase]] | None = None,
     download_secret: str | None = None,
-    include_builtin_schedule_tools: bool = True,
     title: str = "AgentScope",
     version: str = __version__,
     **kwargs: Any,
@@ -299,7 +298,6 @@ def create_app(
     app.state.knowledge_base_manager = knowledge_base_manager
     app.state.extra_agent_middlewares = extra_agent_middlewares
     app.state.extra_agent_tools = extra_agent_tools
-    app.state.include_builtin_schedule_tools = include_builtin_schedule_tools
     app.state.custom_agent_cls = custom_agent_cls
     app.state.resource_access_policy = (
         resource_access_policy or DenyAllResourceAccessPolicy()
