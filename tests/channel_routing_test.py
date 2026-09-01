@@ -139,6 +139,28 @@ class ChannelRoutingTest(TestCase):
         rec = _record([ChannelBinding(match_value="*", agent_id="a")])
         self.assertEqual(resolve(_event(), rec), resolve(_event(), rec))
 
+    def test_epoch_zero_matches_legacy(self) -> None:
+        """epoch=0 (default) keeps the pre-/new session id."""
+        from agentscope.app.channel._routing import make_session_id
+
+        rec = _record([ChannelBinding(match_value="*", agent_id="a")])
+        legacy = resolve(_event(), rec)[1]
+        self.assertEqual(resolve(_event(), rec, epoch=0)[1], legacy)
+        self.assertEqual(
+            make_session_id("chan-1", "a", "oc_group", epoch=0),
+            legacy,
+        )
+
+    def test_epoch_rotates_session_id(self) -> None:
+        """Positive epoch yields a different, still-deterministic id."""
+        rec = _record([ChannelBinding(match_value="*", agent_id="a")])
+        base = resolve(_event(), rec)[1]
+        v1 = resolve(_event(), rec, epoch=1)[1]
+        v2 = resolve(_event(), rec, epoch=2)[1]
+        self.assertNotEqual(base, v1)
+        self.assertNotEqual(v1, v2)
+        self.assertEqual(v1, resolve(_event(), rec, epoch=1)[1])
+
     def test_routing_requires_catch_all(self) -> None:
         """RoutingConfig rejects a rule set without a catch-all."""
         with self.assertRaises(ValueError):

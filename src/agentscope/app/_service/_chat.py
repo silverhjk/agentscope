@@ -125,6 +125,7 @@ class ChatService:
         custom_agent_cls: type[Agent] | None = None,
         extra_projectors: list[EventProjector] | None = None,
         channel_clients: "ChannelClients | None" = None,
+        include_builtin_schedule_tools: bool = True,
     ) -> None:
         """Initialize chat service.
 
@@ -218,6 +219,7 @@ class ChatService:
         self._channel_clients = channel_clients
         self._sub_agent_templates = custom_subagent_templates
         self._agent_cls = custom_agent_cls or Agent
+        self._include_builtin_schedule_tools = include_builtin_schedule_tools
         self._projection = SessionProjection(message_bus)
         self._projectors: list[EventProjector] = [
             SubagentHitlProjector(storage),
@@ -908,6 +910,7 @@ class ChatService:
                     sub_agent_templates=self._sub_agent_templates,
                     team_role=team_ctx.role if team_ctx else None,
                     channel_tools=channel_tools,
+                    include_schedule_tools=self._include_builtin_schedule_tools,
                 )
 
                 # -------------------------------------------------------------

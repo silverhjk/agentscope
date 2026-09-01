@@ -137,8 +137,15 @@ class ChannelLifecycleDispatcher:
                 credentials=record.credentials,
                 config=record.platform_config,
             )
+
+            async def _emit(
+                event: ChannelEvent | ChannelConfirmationResultEvent,
+                _channel: ChannelBase = channel,
+            ) -> None:
+                await self._gateway.process(event, channel=_channel)
+
             task = asyncio.create_task(
-                channel.start_listening(self._gateway.process),
+                channel.start_listening(_emit),
                 name=f"channel-listener:{record.id}",
             )
             self._instances[record.id] = ChannelInstance(

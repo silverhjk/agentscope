@@ -326,6 +326,7 @@ class MessageBusKeys:  # pylint: disable=too-many-public-methods
     _CHANNEL_LIVENESS = "agentscope:channel:liveness:{cid}"
     _CHANNEL_MEDIA = "agentscope:channel:media:{cid}:{chat}:{uid}"
     _CHANNEL_SEEN_CHATS = "agentscope:channel:seen_chats:{cid}"
+    _CHANNEL_SESSION_EPOCH = "agentscope:channel:session_epoch:{cid}"
 
     @classmethod
     def channel_lifecycle(cls) -> str:
@@ -356,3 +357,12 @@ class MessageBusKeys:  # pylint: disable=too-many-public-methods
     def channel_seen_chats(cls, channel_id: str) -> str:
         """Registry namespace of chat_ids the bot has been messaged in."""
         return cls._CHANNEL_SEEN_CHATS.format(cid=channel_id)
+
+    @classmethod
+    def channel_session_epoch(cls, channel_id: str) -> str:
+        """Registry namespace of IM session epochs (``/new`` rotation).
+
+        Field is ``{agent_id}:{scope_key}`` → integer string. Epoch ``0``
+        (missing) keeps the historical session id formula.
+        """
+        return cls._CHANNEL_SESSION_EPOCH.format(cid=channel_id)

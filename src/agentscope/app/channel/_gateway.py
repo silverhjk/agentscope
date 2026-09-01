@@ -33,9 +33,17 @@ from ..storage import (
     StorageBase,
 )
 from ..workspace_manager import WorkspaceManagerBase
-from ._base import ChannelEvent, ChannelConfirmationResultEvent
+from ._base import ChannelBase, ChannelEvent, ChannelConfirmationResultEvent
 from ._decision import resume_after_decision
-from ._routing import resolve
+from ._routing import make_session_id, resolve, resolve_binding
+from ._session_commands import (
+    HELP_TEXT,
+    NEW_SESSION_ACK,
+    bump_session_epoch,
+    extract_command_text,
+    get_session_epoch,
+    parse_session_command,
+)
 
 # How long a media-only message waits for its accompanying text message.
 _MEDIA_BUFFER_TTL_SECS = 300
@@ -67,18 +75,21 @@ class ChannelGateway:
     async def process(
         self,
         event: ChannelEvent | ChannelConfirmationResultEvent,
+        channel: ChannelBase | None = None,
     ) -> None:
         """Handle one inbound event (message or confirmation decision).
 
         Args:
             event (`ChannelEvent | ChannelConfirmationResultEvent`): The
                 inbound message or card-click decision.
+            channel (`ChannelBase | None`): Live channel (slash-command
+                notices). Optional on the confirmation path.
         """
         try:
             if isinstance(event, ChannelConfirmationResultEvent):
                 await self._handle_decision(event)
             else:
-                await self._handle_message(event)
+                await self._handle_message(event, channel)
         except Exception:  # pylint: disable=broad-except
             logger.exception(
                 "ChannelGateway.process failed for channel %s",
@@ -108,14 +119,19 @@ class ChannelGateway:
         if event.agent_id and event.session_id:
             guess = (event.agent_id, event.session_id)
         else:
-            agent_id, session_id, _ = resolve(
-                ChannelEvent(
-                    channel_id=event.channel_id,
-                    channel_user_id=event.channel_user_id,
-                    chat_id=event.chat_id,
-                ),
-                record,
+            probe = ChannelEvent(
+                channel_id=event.channel_id,
+                channel_user_id=event.channel_user_id,
+                chat_id=event.chat_id,
             )
+            agent_id, scope_key, _ = resolve_binding(probe, record)
+            epoch = await get_session_epoch(
+                self._bus,
+                channel_id=record.id,
+                agent_id=agent_id,
+                scope_key=scope_key,
+            )
+            agent_id, session_id, _ = resolve(probe, record, epoch=epoch)
             guess = (agent_id, session_id)
 
         if await self._resume(record.user_id, guess, event):
@@ -176,12 +192,17 @@ class ChannelGateway:
 
     # -- Message path --
 
-    async def _handle_message(self, event: ChannelEvent) -> None:
+    async def _handle_message(
+        self,
+        event: ChannelEvent,
+        channel: ChannelBase | None = None,
+    ) -> None:
         """Aggregate buffered media, then inject a hint into a live run
         or start a fresh user turn on an idle session.
 
         Args:
             event (`ChannelEvent`): The normalised inbound message.
+            channel (`ChannelBase | None`): Live channel for command acks.
         """
         record = await self._storage.get_channel(event.channel_id)
         if record is None:
@@ -190,7 +211,19 @@ class ChannelGateway:
         if not record.enabled:
             return  # stale event from a since-disabled channel
 
-        agent_id, session_id, scope = resolve(event, record)
+        agent_id, scope_key, scope = resolve_binding(event, record)
+        epoch = await get_session_epoch(
+            self._bus,
+            channel_id=record.id,
+            agent_id=agent_id,
+            scope_key=scope_key,
+        )
+        session_id = make_session_id(
+            record.id,
+            agent_id,
+            scope_key,
+            epoch=epoch,
+        )
         if event.chat_id:
             await self._bus.registry_set(
                 MessageBusKeys.channel_seen_chats(event.channel_id),
@@ -201,6 +234,18 @@ class ChannelGateway:
         content = await self._aggregate_media(event)
         if content is None:
             return  # media buffered; nothing to run until a text message
+
+        command = parse_session_command(extract_command_text(content))
+        if command is not None:
+            await self._handle_session_command(
+                event,
+                channel,
+                record=record,
+                agent_id=agent_id,
+                scope_key=scope_key,
+                command=command,
+            )
+            return
 
         # A reply already in flight → inject the input as a hint so the
         # live run folds it in. Otherwise start a fresh user turn.
@@ -232,6 +277,49 @@ class ChannelGateway:
             kind=MessageBusKeys.WAKEUP_KIND_MESSAGE,
             inputs=UserMsg(name=event.channel_user_id, content=content),
         )
+
+    async def _handle_session_command(
+        self,
+        event: ChannelEvent,
+        channel: ChannelBase | None,
+        *,
+        record: ChannelRecord,
+        agent_id: str,
+        scope_key: str,
+        command: str,
+    ) -> None:
+        """Handle ``/new`` / ``/help`` without starting an agent turn."""
+        if command == "new":
+            epoch = await bump_session_epoch(
+                self._bus,
+                channel_id=record.id,
+                agent_id=agent_id,
+                scope_key=scope_key,
+            )
+            logger.info(
+                "channel %s chat scope=%s new session epoch=%s",
+                record.id,
+                scope_key,
+                epoch,
+            )
+            text = NEW_SESSION_ACK
+        else:
+            text = HELP_TEXT
+
+        if channel is None:
+            logger.warning(
+                "session command %s on %s but no channel to ack",
+                command,
+                record.id,
+            )
+            return
+        ok = await channel.send_notice(event, text)
+        if not ok:
+            logger.warning(
+                "session command %s ack failed on channel %s",
+                command,
+                record.id,
+            )
 
     async def _aggregate_media(
         self,

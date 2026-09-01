@@ -6,6 +6,10 @@ rules on the channel record, both the target agent and the session id
 are computed deterministically from the event — so every node derives
 the same result with zero coordination, and session creation is
 idempotent (``get_or_create`` on a derived id).
+
+An optional **epoch** (from ``/new``) is folded into the hash so the same
+chat can rotate onto a fresh session without losing older history.
+Epoch ``0`` preserves the original id formula for existing chats.
 """
 from uuid import NAMESPACE_URL, uuid5
 
@@ -38,19 +42,18 @@ def _binding_matches(event: ChannelEvent, binding: ChannelBinding) -> bool:
     return value == binding.match_value
 
 
-def resolve(
+def resolve_binding(
     event: ChannelEvent,
     record: ChannelRecord,
 ) -> tuple[str, str, SessionScope]:
-    """Resolve an event to ``(agent_id, session_id, scope)`` via the first
-    matching binding and a stable id from ``(channel, agent, scope_key)``.
+    """Resolve ``(agent_id, scope_key, scope)`` without hashing a session.
 
     Args:
         event (`ChannelEvent`): The inbound event.
         record (`ChannelRecord`): The channel's configuration.
 
     Returns:
-        `tuple[str, str, SessionScope]`: ``(agent_id, session_id, scope)``.
+        `tuple[str, str, SessionScope]`: Agent id, scope key, and scope.
     """
     binding = record.routing.bindings[-1]
     for candidate in record.routing.bindings:
@@ -65,10 +68,55 @@ def resolve(
     else:
         scope_key = event.chat_id
 
-    session_id = str(
-        uuid5(
-            _SESSION_NAMESPACE,
-            f"{record.id}:{binding.agent_id}:{scope_key}",
-        ),
+    return binding.agent_id, scope_key, binding.session_scope
+
+
+def make_session_id(
+    channel_id: str,
+    agent_id: str,
+    scope_key: str,
+    *,
+    epoch: int = 0,
+) -> str:
+    """Stable session id from channel / agent / scope (+ optional epoch).
+
+    Args:
+        channel_id (`str`): Channel record id.
+        agent_id (`str`): Bound agent id.
+        scope_key (`str`): Chat (or chat:user) key.
+        epoch (`int`): Session generation; ``0`` uses the legacy formula.
+
+    Returns:
+        `str`: UUID5 session id.
+    """
+    if epoch and epoch > 0:
+        material = f"{channel_id}:{agent_id}:{scope_key}:v{epoch}"
+    else:
+        material = f"{channel_id}:{agent_id}:{scope_key}"
+    return str(uuid5(_SESSION_NAMESPACE, material))
+
+
+def resolve(
+    event: ChannelEvent,
+    record: ChannelRecord,
+    *,
+    epoch: int = 0,
+) -> tuple[str, str, SessionScope]:
+    """Resolve an event to ``(agent_id, session_id, scope)``.
+
+    Args:
+        event (`ChannelEvent`): The inbound event.
+        record (`ChannelRecord`): The channel's configuration.
+        epoch (`int`): Optional session generation from ``/new``.
+
+    Returns:
+        `tuple[str, str, SessionScope]`: ``(agent_id, session_id, scope)``.
+    """
+    agent_id, scope_key, scope = resolve_binding(event, record)
+    session_id = make_session_id(
+        record.id,
+        agent_id,
+        scope_key,
+        epoch=epoch,
     )
-    return binding.agent_id, session_id, binding.session_scope
+    return agent_id, session_id, scope

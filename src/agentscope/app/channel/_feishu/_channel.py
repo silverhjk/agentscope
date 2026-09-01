@@ -651,6 +651,25 @@ class FeishuChannel(ChannelBase):
 
     # -- Outbound (gateway → platform) --
 
+    async def send_notice(
+        self,
+        event: ChannelEvent,
+        text: str,
+    ) -> bool:
+        """Send a plain-text system notice into the event's chat.
+
+        Args:
+            event (`ChannelEvent`): Chat to notify (uses ``chat_id``).
+            text (`str`): Notice body.
+
+        Returns:
+            `bool`: Whether Feishu accepted the message.
+        """
+        if not event.chat_id:
+            return False
+        result = await self.send_message_to(event.chat_id, "chat_id", text)
+        return result is not None
+
     async def send_response(
         self,
         event: ChannelEvent,

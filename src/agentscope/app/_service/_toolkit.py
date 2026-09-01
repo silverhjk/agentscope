@@ -52,6 +52,7 @@ async def get_toolkit(
     sub_agent_templates: dict[str, SubAgentTemplate] | None = None,
     team_role: Literal["leader", "worker"] | None = None,
     channel_tools: list[ToolBase] | None = None,
+    include_schedule_tools: bool = True,
 ) -> Toolkit:
     """Assemble the complete :class:`Toolkit` for one chat turn.
 
@@ -123,6 +124,10 @@ optional):
         channel_tools (`list[ToolBase] | None`, optional):
             Platform tools of the originating channel, resolved once
             by the caller. ``None`` / empty when channel-less.
+        include_schedule_tools (`bool`, optional):
+            When ``False``, skip the built-in Schedule* tool group so a
+            host can expose whitelist-gated schedule tools via
+            ``extra_factory`` instead. Defaults to ``True``.
 
     Returns:
         `Toolkit`: Fully populated toolkit (tools + skills + MCPs).
@@ -143,7 +148,10 @@ optional):
 
     # Schedule control. Requires a model config on this session because
     # ``ScheduleCreate`` records it into new ``ScheduleRecord`` instances.
-    if session_record.config.chat_model_config is not None:
+    if (
+        include_schedule_tools
+        and session_record.config.chat_model_config is not None
+    ):
         # Add schedule tools as a tool group
         tool_groups.append(
             ToolGroup(

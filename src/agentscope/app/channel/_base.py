@@ -434,6 +434,23 @@ class ChannelBase(ABC):
         """
         return None
 
+    async def send_notice(  # pylint: disable=unused-argument
+        self,
+        event: ChannelEvent,
+        text: str,
+    ) -> bool:
+        """Send a short system notice into ``event``'s chat (e.g. ``/new``).
+
+        Args:
+            event (`ChannelEvent`): Chat / user to notify.
+            text (`str`): Plain or Markdown notice body.
+
+        Returns:
+            `bool`: Whether the platform accepted the message. Default
+            ``False`` (unsupported).
+        """
+        return False
+
     async def remove_reaction(
         self,
         event: ChannelEvent,
