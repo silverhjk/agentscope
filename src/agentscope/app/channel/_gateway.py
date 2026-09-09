@@ -50,6 +50,10 @@ _MEDIA_BUFFER_TTL_SECS = 300
 # Max buffered attachments carried into one text message.
 _MEDIA_BUFFER_MAX = 9
 
+# Fallback chat notice when reaction / streaming card is unavailable.
+_WORKING_NOTICE = "已收到，正在处理…"
+_INBOX_NOTICE = "已收到，当前任务结束后会继续处理…"
+
 
 class ChannelGateway:
     """Route inbound channel events into runs; resume on card clicks."""
@@ -264,6 +268,7 @@ class ChannelGateway:
                     ),
                 ).model_dump(mode="json"),
             )
+            await self._ack_working(channel, event, inbox=True)
             return
 
         await self._ensure_session(record, agent_id, session_id, event, scope)
@@ -277,6 +282,46 @@ class ChannelGateway:
             kind=MessageBusKeys.WAKEUP_KIND_MESSAGE,
             inputs=UserMsg(name=event.channel_user_id, content=content),
         )
+        await self._ack_working(channel, event, inbox=False)
+
+    async def _ack_working(
+        self,
+        channel: ChannelBase | None,
+        event: ChannelEvent,
+        *,
+        inbox: bool,
+    ) -> None:
+        """Give immediate IM feedback that the bot accepted the message.
+
+        Prefer a lightweight reaction (Feishu ``OnIt``). Fall back to a short
+        notice only when there will be no streaming ``处理中`` bubble —
+        streaming channels open that placeholder in ``send_response``.
+        """
+        if channel is None:
+            return
+        try:
+            reaction_id = await channel.send_reaction(event, "OnIt")
+        except Exception:  # pylint: disable=broad-except
+            logger.debug(
+                "working ack reaction failed on channel %s",
+                event.channel_id,
+                exc_info=True,
+            )
+            reaction_id = None
+        if reaction_id is not None:
+            return
+        # Avoid duplicate "已收到" text when a streaming card will appear.
+        if channel.capabilities.streaming and not inbox:
+            return
+        notice = _INBOX_NOTICE if inbox else _WORKING_NOTICE
+        try:
+            await channel.send_notice(event, notice)
+        except Exception:  # pylint: disable=broad-except
+            logger.debug(
+                "working ack notice failed on channel %s",
+                event.channel_id,
+                exc_info=True,
+            )
 
     async def _handle_session_command(
         self,

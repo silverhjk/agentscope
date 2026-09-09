@@ -62,6 +62,7 @@ _AI_CARD_CONTENT_KEY = "content"
 _APPROVAL_CARD_TEMPLATE_ID = "382e4302-551d-4880-bf29-a30acfab2e71.schema"
 _STATUS_POLL_INTERVAL = 0.2
 _STREAM_MIN_INTERVAL = 0.3
+_STREAM_PLACEHOLDER = "⏳ 处理中…"
 _STREAM_FALLBACK_NOTICE = (
     "Streaming stopped. The complete reply follows as a Markdown message."
 )
@@ -103,7 +104,7 @@ class DingTalkChannel(ChannelBase):
             "@mentioned",
         )
         show_tool_process: bool = Field(
-            default=False,
+            default=True,
             title="Show tool process",
             description="Show tool calls and results inline in the reply",
         )
@@ -326,6 +327,19 @@ class DingTalkChannel(ChannelBase):
         stream_ref: str | None = None
         stream_failed = False
         last_stream_update = 0.0
+        # Open the AI Card immediately so the chat shows activity before
+        # the first model token / tool event arrives.
+        if self.capabilities.streaming and event.chat_id:
+            stream_ref = await self._open_streaming_card(event.chat_id)
+            if stream_ref is None:
+                stream_failed = True
+            elif not await self._update_streaming_card(
+                stream_ref,
+                _STREAM_PLACEHOLDER,
+            ):
+                # Keep stream_ref so finish can mark the card as error /
+                # fall back to Markdown.
+                stream_failed = True
         async for raw in events:
             agent_event = _EVENT_ADAPTER.validate_python(raw)
             if isinstance(agent_event, RequireUserConfirmEvent):
@@ -460,11 +474,14 @@ class DingTalkChannel(ChannelBase):
         text: str,
     ) -> bool:
         """Finalize a live card, returning false for Markdown fallback."""
-        if out_track_id is None or not text:
+        if out_track_id is None:
             return False
+        # Keep the placeholder card if the run produced no text, so we do
+        # not leave a "generating" card hanging in the chat.
+        final_text = text.strip() or _STREAM_PLACEHOLDER
         updated = await self._update_streaming_card(
             out_track_id,
-            text,
+            final_text,
             finalize=True,
         )
         if not updated:

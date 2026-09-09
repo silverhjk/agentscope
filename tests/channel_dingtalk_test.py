@@ -740,7 +740,7 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
             channel._config.model_dump(),
             {
                 "only_at_reply": True,
-                "show_tool_process": False,
+                "show_tool_process": True,
                 "show_thinking": False,
                 "max_media_bytes": 10 * 1024 * 1024,
                 "approval_card_template_id": (
@@ -770,7 +770,17 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
             media_api.streaming_card_calls,
             [("group:cid-group-1", "ai-card.schema", "answer")],
         )
-        self.assertGreaterEqual(len(media_api.streaming_updates), 1)
+        self.assertGreaterEqual(len(media_api.streaming_updates), 2)
+        self.assertEqual(
+            media_api.streaming_updates[0],
+            (
+                "stream-track-1",
+                "answer",
+                "⏳ 处理中…",
+                False,
+                False,
+            ),
+        )
         self.assertEqual(
             media_api.streaming_updates[-1],
             (

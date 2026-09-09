@@ -57,6 +57,7 @@ _MEDIA_TYPES = frozenset({"image", "audio", "media", "file"})
 _STREAM_ELEMENT_ID = "md"
 # Minimum seconds between live streaming-card updates (throttle).
 _STREAM_MIN_INTERVAL = 0.7
+_STREAM_PLACEHOLDER = "⏳ 处理中…"
 
 
 class _ThreadLoopProxy:
@@ -118,7 +119,7 @@ class FeishuChannel(ChannelBase):
             "@mentioned",
         )
         show_tool_process: bool = Field(
-            default=False,
+            default=True,
             title="Show tool process",
             description="Show tool calls and results inline in the reply",
         )
@@ -688,6 +689,13 @@ class FeishuChannel(ChannelBase):
         ref: str | None = None
         failed = False
         last = 0.0
+        # Open the CardKit stream immediately so users see activity before
+        # the first model token / tool event arrives.
+        ref = await self._card_open(event)
+        if ref is None:
+            failed = True
+        else:
+            await self._card_push(ref, _STREAM_PLACEHOLDER)
         async for raw in events:
             evt = _EVENT_ADAPTER.validate_python(raw)
             if isinstance(evt, RequireUserConfirmEvent):
@@ -766,7 +774,7 @@ class FeishuChannel(ChannelBase):
             text (`str`): The complete reply text.
         """
         if ref is not None:
-            await self._card_push(ref, text)
+            await self._card_push(ref, text.strip() or _STREAM_PLACEHOLDER)
             await self._close_stream(ref)
             self._stream_seq.pop(ref, None)
         elif text:
