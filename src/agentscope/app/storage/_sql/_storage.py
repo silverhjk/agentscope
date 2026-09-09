@@ -1073,6 +1073,12 @@ class AsyncSQLAlchemyStorage(StorageBase):
                 record.config = config
                 if state is not None:
                     record.state = state
+                if source_chat_id:
+                    record.source_chat_id = source_chat_id
+                if source_chat_name:
+                    record.source_chat_name = source_chat_name
+                if source_channel_id:
+                    record.source_channel_id = source_channel_id
                 await self._write_row(SessionRow, record)
                 return record
 

@@ -95,6 +95,20 @@ class _WorkerContext:
 _TeamContext = _LeaderContext | _WorkerContext
 
 
+def _split_im_chat_id(encoded: str) -> tuple[str, str]:
+    """Split an encoded channel chat id into ``(platform_id, encoded)``.
+
+    DingTalk encodes destinations as ``group:<openConversationId>`` /
+    ``user:<staffId>``. Tools and business fields usually want the bare
+    platform id; keep the encoded form when it differs.
+    """
+    raw = (encoded or "").strip()
+    for prefix in ("group:", "user:", "chat:"):
+        if raw.startswith(prefix):
+            return raw[len(prefix) :], raw
+    return raw, raw
+
+
 class ChatService:
     """Run an agent against a session, persisting input/reply messages
     and updated agent state.
@@ -936,7 +950,9 @@ class ChatService:
                 # -------------------------------------------------------------
                 attachment = f"You're within a session (id={session_id})."
 
-                # Channel-bound sessions: tell the agent which chat it serves.
+                # Channel-bound sessions: inject chat_id + chat_name so the
+                # agent can answer "what is this group's id" and fill fields
+                # without calling search tools.
                 if channel is not None:
                     tools = ", ".join(t.name for t in channel_tools)
                     chat_id = session_record.source_chat_id or ""
@@ -944,14 +960,39 @@ class ChatService:
                     name = (
                         session_record.source_chat_name
                         or await channel.chat_name(chat_id)
+                        or ""
+                    ).strip()
+                    platform_chat_id, encoded_chat_id = _split_im_chat_id(
+                        chat_id,
                     )
-                    where = f' named "{name}"' if name else ""
+                    kind_label = (
+                        "group"
+                        if kind is ChatKind.GROUP
+                        else (
+                            "private"
+                            if kind is ChatKind.PRIVATE
+                            else "unknown"
+                        )
+                    )
+                    name_repr = name if name else "(unknown)"
                     attachment += (
-                        f" This session is bound to a chat{where} (id "
-                        f"{chat_id!r}) on the {channel.display_name} "
-                        f"platform: the messages, images and files people "
-                        f"send there are relayed to you here, and your "
-                        f"replies are delivered back to that same chat."
+                        f" Current {channel.display_name} IM conversation "
+                        f"context — always prefer these values when the user "
+                        f"asks for this chat's id/name, or when writing "
+                        f"chat_id / group fields into tools or business data: "
+                        f"chat_name={name_repr!r}; "
+                        f"chat_id={platform_chat_id!r}"
+                    )
+                    if (
+                        encoded_chat_id
+                        and encoded_chat_id != platform_chat_id
+                    ):
+                        attachment += (
+                            f"; encoded_chat_id={encoded_chat_id!r}"
+                        )
+                    attachment += (
+                        f"; chat_kind={kind_label}. "
+                        f"Your replies are delivered back to this same chat."
                     )
                     if kind is ChatKind.GROUP:
                         attachment += (
@@ -967,8 +1008,9 @@ class ChatService:
                     if tools:
                         attachment += (
                             f" You also have these {channel.display_name} "
-                            f"tools available: {tools}. Pass this chat's id "
-                            f"as their target to act on this chat."
+                            f"tools available: {tools}. Pass chat_id="
+                            f"{platform_chat_id!r} as their target to act "
+                            f"on this chat."
                         )
 
                 attachment = (

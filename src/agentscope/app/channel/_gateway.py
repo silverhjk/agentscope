@@ -280,7 +280,10 @@ class ChannelGateway:
             session_id=session_id,
             agent_id=agent_id,
             kind=MessageBusKeys.WAKEUP_KIND_MESSAGE,
-            inputs=UserMsg(name=event.channel_user_id, content=content),
+            inputs=UserMsg(
+                name=event.channel_user_name or event.channel_user_id,
+                content=content,
+            ),
         )
         await self._ack_working(channel, event, inbox=False)
 
@@ -420,6 +423,19 @@ class ChannelGateway:
             session_id=session_id,
         )
         if existing is not None:
+            # Backfill / refresh group title when the platform later provides it.
+            new_name = (event.chat_name or "").strip()
+            old_name = (existing.source_chat_name or "").strip()
+            if new_name and new_name != old_name:
+                await self._storage.upsert_session(
+                    user_id=record.user_id,
+                    agent_id=agent_id,
+                    config=existing.config,
+                    session_id=session_id,
+                    source_chat_id=existing.source_chat_id or event.chat_id,
+                    source_chat_name=new_name,
+                    source_channel_id=existing.source_channel_id or record.id,
+                )
             return
 
         fallback = record.session.fallback_chat_model_config
