@@ -281,8 +281,14 @@ class ChannelGateway:
             agent_id=agent_id,
             kind=MessageBusKeys.WAKEUP_KIND_MESSAGE,
             inputs=UserMsg(
+                # Prefer display name in history for readability; stable IM
+                # ids live in metadata for tools / system-prompt injection.
                 name=event.channel_user_name or event.channel_user_id,
                 content=content,
+                metadata={
+                    "channel_user_id": event.channel_user_id or "",
+                    "channel_user_name": event.channel_user_name or "",
+                },
             ),
         )
         await self._ack_working(channel, event, inbox=False)

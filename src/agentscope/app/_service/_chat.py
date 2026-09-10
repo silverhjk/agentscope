@@ -109,6 +109,36 @@ def _split_im_chat_id(encoded: str) -> tuple[str, str]:
     return raw, raw
 
 
+def _im_speaker_from_input(
+    input_msg: object,
+) -> tuple[str, str]:
+    """Return ``(user_id, display_name)`` for the current channel user turn.
+
+    Prefers gateway metadata (``channel_user_id`` / ``channel_user_name``);
+    falls back to the message ``name`` for older turns.
+    """
+    msg: Msg | None = None
+    if isinstance(input_msg, Msg):
+        msg = input_msg
+    elif isinstance(input_msg, list):
+        for item in reversed(input_msg):
+            if isinstance(item, Msg) and item.role == "user":
+                msg = item
+                break
+    if msg is None or msg.role != "user":
+        return "", ""
+
+    meta = msg.metadata if isinstance(msg.metadata, dict) else {}
+    user_id = str(meta.get("channel_user_id") or "").strip()
+    user_name = str(meta.get("channel_user_name") or "").strip()
+    fallback = (msg.name or "").strip()
+    if not user_id:
+        user_id = fallback
+    if not user_name:
+        user_name = fallback if fallback != user_id else ""
+    return user_id, user_name
+
+
 class ChatService:
     """Run an agent against a session, persisting input/reply messages
     and updated agent state.
@@ -716,6 +746,24 @@ class ChatService:
                     )
                 worker_name = agent_record.data.name
 
+                # Persist the inbound user turn early so IM peer resolution
+                # (memory / business-data / approval tools) can see the
+                # current group speaker on this same run.
+                if isinstance(input_msg, Msg):
+                    await self._storage.upsert_message(
+                        user_id,
+                        session_id,
+                        input_msg,
+                    )
+                elif isinstance(input_msg, list):
+                    for msg in input_msg:
+                        if isinstance(msg, Msg):
+                            await self._storage.upsert_message(
+                                user_id,
+                                session_id,
+                                msg,
+                            )
+
                 # -------------------------------------------------------------
                 # 1b. Resolve the team identity ONCE, before anything that
                 # can fail: a worker whose assembly dies still has to reach
@@ -952,7 +1000,8 @@ class ChatService:
 
                 # Channel-bound sessions: inject chat_id + chat_name so the
                 # agent can answer "what is this group's id" and fill fields
-                # without calling search tools.
+                # without calling search tools. Also inject the current
+                # speaker (group @ / private chat) for identity-aware tools.
                 if channel is not None:
                     tools = ", ".join(t.name for t in channel_tools)
                     chat_id = session_record.source_chat_id or ""
@@ -975,6 +1024,9 @@ class ChatService:
                         )
                     )
                     name_repr = name if name else "(unknown)"
+                    speaker_id, speaker_name = _im_speaker_from_input(
+                        input_msg,
+                    )
                     attachment += (
                         f" Current {channel.display_name} IM conversation "
                         f"context — always prefer these values when the user "
@@ -994,11 +1046,26 @@ class ChatService:
                         f"; chat_kind={kind_label}. "
                         f"Your replies are delivered back to this same chat."
                     )
+                    if speaker_id or speaker_name:
+                        speaker_name_repr = (
+                            speaker_name if speaker_name else "(unknown)"
+                        )
+                        speaker_id_repr = (
+                            speaker_id if speaker_id else "(unknown)"
+                        )
+                        attachment += (
+                            " Current message sender (the human talking to "
+                            "you in this turn — use for identity, org "
+                            "lookup, approvals, memory, and row ACL): "
+                            f"user_name={speaker_name_repr!r}; "
+                            f"user_id={speaker_id_repr!r}."
+                        )
                     if kind is ChatKind.GROUP:
                         attachment += (
                             " It is a group chat, so messages may come "
                             "from several different people; each incoming "
-                            "user turn is labelled with its sender."
+                            "user turn is labelled with its sender, and the "
+                            "fields above describe only the current asker."
                         )
                     elif kind is ChatKind.PRIVATE:
                         attachment += (
