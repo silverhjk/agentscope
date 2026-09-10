@@ -148,6 +148,169 @@ class SchedulerManager:
     # Trigger construction
     # ------------------------------------------------------------------
 
+    async def fire(
+        self,
+        record: ScheduleRecord,
+        *,
+        respect_enabled: bool = True,
+        reason: str = "cron",
+    ) -> str | None:
+        """Execute one schedule run (session + inbox HintBlock + wakeup).
+
+        Args:
+            record (`ScheduleRecord`):
+                Schedule to run.
+            respect_enabled (`bool`, defaults to ``True``):
+                When True, a disabled schedule is skipped (cron path).
+                Manual / admin triggers pass False so operators can test
+                or re-run regardless of the enabled flag.
+            reason (`str`, defaults to ``"cron"``):
+                Logged label (e.g. ``cron``, ``manual``).
+
+        Returns:
+            `str | None`:
+                Created / reused session id, or ``None`` when skipped.
+
+        Raises:
+            Exception:
+                Propagates session / inbox failures so callers (manual
+                API) can surface them. The APScheduler wrapper catches.
+        """
+        logger.info(
+            "[Schedule:%s(%s)] Trigger fired (%s)",
+            record.id,
+            record.data.name,
+            reason,
+        )
+
+        if respect_enabled and not record.data.enabled:
+            logger.info(
+                "[Schedule:%s(%s)] Skipped — schedule disabled",
+                record.id,
+                record.data.name,
+            )
+            return None
+
+        storage = self._storage
+        message_bus = self._message_bus
+        workspace_manager = self._workspace_manager
+
+        if record.data.stateful:
+            stateful_session_id = f"{record.id}_stateful"
+            logger.info(
+                "[Schedule:%s(%s)] Stateful mode, looking up session %s",
+                record.id,
+                record.data.name,
+                stateful_session_id,
+            )
+            session = await storage.get_session(
+                record.user_id,
+                record.agent_id,
+                stateful_session_id,
+            )
+            if session is None:
+                logger.info(
+                    "[Schedule:%s(%s)] First fire, creating stateful session",
+                    record.id,
+                    record.data.name,
+                )
+                state = AgentState()
+                state.permission_context = PermissionContext(
+                    mode=record.data.permission_mode,
+                )
+                session_config = SessionConfig(
+                    workspace_id=(
+                        await workspace_manager.assign_workspace_id(
+                            user_id=record.user_id,
+                            agent_id=record.agent_id,
+                            session_id=stateful_session_id,
+                        )
+                    ),
+                    chat_model_config=record.data.chat_model_config,
+                )
+                session = await storage.upsert_session(
+                    user_id=record.user_id,
+                    agent_id=record.agent_id,
+                    config=session_config,
+                    state=state,
+                    session_id=stateful_session_id,
+                    source=SessionSource.SCHEDULE,
+                    source_schedule_id=record.id,
+                )
+            else:
+                logger.info(
+                    "[Schedule:%s(%s)] Reusing existing stateful session %s",
+                    record.id,
+                    record.data.name,
+                    session.id,
+                )
+        else:
+            logger.info(
+                "[Schedule:%s(%s)] Non-stateful mode, creating fresh session",
+                record.id,
+                record.data.name,
+            )
+            state = AgentState()
+            state.permission_context = PermissionContext(
+                mode=record.data.permission_mode,
+            )
+            session = await storage.upsert_session(
+                user_id=record.user_id,
+                agent_id=record.agent_id,
+                config=SessionConfig(
+                    workspace_id=(
+                        await workspace_manager.assign_workspace_id(
+                            user_id=record.user_id,
+                            agent_id=record.agent_id,
+                            session_id=_generate_id(),
+                        )
+                    ),
+                    chat_model_config=record.data.chat_model_config,
+                ),
+                state=state,
+                source=SessionSource.SCHEDULE,
+                source_schedule_id=record.id,
+            )
+
+        logger.info(
+            "[Schedule:%s(%s)] Session ready: %s, "
+            "delivering prompt via inbox + wakeup",
+            record.id,
+            record.data.name,
+            session.id,
+        )
+
+        hint = HintBlock(
+            hint=(
+                f"<scheduled-task>\n"
+                f"{record.data.description}\n"
+                f"</scheduled-task>"
+            ),
+            source=json.dumps(
+                {
+                    "label": "schedule",
+                    "sublabel": record.data.name,
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        await deliver_to_inbox(
+            message_bus,
+            user_id=record.user_id,
+            session_id=session.id,
+            agent_id=record.agent_id,
+            payload=hint.model_dump(mode="json"),
+        )
+
+        logger.info(
+            "[Schedule:%s(%s)] Wakeup enqueued for session %s",
+            record.id,
+            record.data.name,
+            session.id,
+        )
+        return session.id
+
     def _build_trigger(
         self,
         record: ScheduleRecord,
@@ -160,8 +323,7 @@ class SchedulerManager:
         1. Skips execution when the schedule is disabled.
         2. Resolves or creates the target session (stateful reuses a fixed
            session; non-stateful creates a fresh one on every fire).
-        3. Calls :class:`~agentscope.app._service._chat.ChatService` and
-           drains the response stream (fire-and-forget).
+        3. Delivers a HintBlock via inbox and enqueues a wakeup.
         4. Catches and logs all exceptions to prevent APScheduler from
            removing the job on failure.
 
@@ -173,150 +335,10 @@ class SchedulerManager:
             `Callable[[], Coroutine]`:
                 A zero-argument async callable suitable for APScheduler.
         """
-        # Closure-friendly references so APScheduler doesn't have to
-        # re-look these up on every fire.
-        storage = self._storage
-        message_bus = self._message_bus
-        workspace_manager = self._workspace_manager
 
         async def _trigger() -> None:
-            logger.info(
-                "[Schedule:%s(%s)] Trigger fired",
-                record.id,
-                record.data.name,
-            )
-
-            if not record.data.enabled:
-                logger.info(
-                    "[Schedule:%s(%s)] Skipped — schedule disabled",
-                    record.id,
-                    record.data.name,
-                )
-                return
-
             try:
-                if record.data.stateful:
-                    stateful_session_id = f"{record.id}_stateful"
-                    logger.info(
-                        "[Schedule:%s(%s)] Stateful mode, "
-                        "looking up session %s",
-                        record.id,
-                        record.data.name,
-                        stateful_session_id,
-                    )
-                    session = await storage.get_session(
-                        record.user_id,
-                        record.agent_id,
-                        stateful_session_id,
-                    )
-                    if session is None:
-                        logger.info(
-                            "[Schedule:%s(%s)] First fire, "
-                            "creating stateful session",
-                            record.id,
-                            record.data.name,
-                        )
-                        state = AgentState()
-                        state.permission_context = PermissionContext(
-                            mode=record.data.permission_mode,
-                        )
-                        session_config = SessionConfig(
-                            workspace_id=(
-                                await workspace_manager.assign_workspace_id(
-                                    user_id=record.user_id,
-                                    agent_id=record.agent_id,
-                                    session_id=stateful_session_id,
-                                )
-                            ),
-                            chat_model_config=record.data.chat_model_config,
-                        )
-                        session = await storage.upsert_session(
-                            user_id=record.user_id,
-                            agent_id=record.agent_id,
-                            config=session_config,
-                            state=state,
-                            session_id=stateful_session_id,
-                            source=SessionSource.SCHEDULE,
-                            source_schedule_id=record.id,
-                        )
-                    else:
-                        logger.info(
-                            "[Schedule:%s(%s)] Reusing existing "
-                            "stateful session %s",
-                            record.id,
-                            record.data.name,
-                            session.id,
-                        )
-                else:
-                    logger.info(
-                        "[Schedule:%s(%s)] Non-stateful mode, "
-                        "creating fresh session",
-                        record.id,
-                        record.data.name,
-                    )
-                    state = AgentState()
-                    state.permission_context = PermissionContext(
-                        mode=record.data.permission_mode,
-                    )
-                    session = await storage.upsert_session(
-                        user_id=record.user_id,
-                        agent_id=record.agent_id,
-                        config=SessionConfig(
-                            workspace_id=(
-                                await workspace_manager.assign_workspace_id(
-                                    user_id=record.user_id,
-                                    agent_id=record.agent_id,
-                                    session_id=_generate_id(),
-                                )
-                            ),
-                            chat_model_config=record.data.chat_model_config,
-                        ),
-                        state=state,
-                        source=SessionSource.SCHEDULE,
-                        source_schedule_id=record.id,
-                    )
-
-                logger.info(
-                    "[Schedule:%s(%s)] Session ready: %s, "
-                    "delivering prompt via inbox + wakeup",
-                    record.id,
-                    record.data.name,
-                    session.id,
-                )
-
-                # Wrap the schedule prompt in an XML tag so the LLM
-                # recognises it as a system-driven trigger rather than
-                # a regular user turn — same shape as team / system
-                # notification hints.
-                hint = HintBlock(
-                    hint=(
-                        f"<scheduled-task>\n"
-                        f"{record.data.description}\n"
-                        f"</scheduled-task>"
-                    ),
-                    source=json.dumps(
-                        {
-                            "label": "schedule",
-                            "sublabel": record.data.name,
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
-                await deliver_to_inbox(
-                    message_bus,
-                    user_id=record.user_id,
-                    session_id=session.id,
-                    agent_id=record.agent_id,
-                    payload=hint.model_dump(mode="json"),
-                )
-
-                logger.info(
-                    "[Schedule:%s(%s)] Wakeup enqueued for session %s",
-                    record.id,
-                    record.data.name,
-                    session.id,
-                )
-
+                await self.fire(record, respect_enabled=True, reason="cron")
             except Exception:
                 logger.exception(
                     "[Schedule:%s(%s)] Trigger failed",

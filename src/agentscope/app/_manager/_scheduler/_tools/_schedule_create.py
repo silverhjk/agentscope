@@ -37,9 +37,9 @@ class _ScheduleCreateParams(BaseModel):
     )
 
     timezone: str = Field(
-        default="UTC",
+        default="Asia/Shanghai",
         description="IANA timezone name used to evaluate the cron expression, "
-        "e.g. 'America/New_York' or 'Asia/Shanghai'.",
+        "e.g. 'Asia/Shanghai' or 'UTC'. Defaults to Asia/Shanghai.",
     )
 
     enabled: bool = Field(
@@ -166,7 +166,7 @@ to complete the task independently.
         name: str,
         cron_expression: str,
         description: str = "",
-        timezone: str = "UTC",
+        timezone: str = "Asia/Shanghai",
         enabled: bool = True,
         started_at: datetime | None = None,
         ended_at: datetime | None = None,

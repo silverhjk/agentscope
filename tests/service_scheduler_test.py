@@ -173,7 +173,12 @@ class TestSchedulerFireDelivery(_SchedulerFireTestBase):
                 "finished_at": AnyString(),
                 "hint": AnyString(),
                 "source": json.dumps(
-                    {"label": "schedule", "sublabel": record.data.name},
+                    {
+                        "label": "schedule",
+                        "sublabel": record.data.name,
+                        "reason": "cron",
+                    },
+                    ensure_ascii=False,
                 ),
             },
         )
