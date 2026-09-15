@@ -29,6 +29,7 @@ class SendFile(_DingTalkToolBase):
 or group.
 
 Supported DingTalk file extensions are doc, docx, pdf, rar, xlsx, and zip. \
+Markdown (``.md``) is auto-converted to PDF before upload. \
 Obtain ``target`` from a discovery tool. The operation requires \
 confirmation. Use ``SendImage`` for inline images."""
     is_read_only: bool = False

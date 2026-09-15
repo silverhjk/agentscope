@@ -1,0 +1,401 @@
+# -*- coding: utf-8 -*-
+"""Convert Markdown to PDF for DingTalk + admin downloads.
+
+Preferred order (Chrome first for real Markdown fidelity):
+
+1. Env ``MD_TO_PDF_CMD`` (``{input}`` / ``{output}``)
+2. ``md-to-pdf`` / ``npx --yes md-to-pdf`` (headless Chrome / Puppeteer)
+3. ``pandoc``
+4. ``agentscope-md2pdf`` (reportlab CLI / in-process) — last-resort fallback
+
+Force reportlab-first (legacy)::
+
+    MD_TO_PDF_PREFER_BUILTIN=1
+
+Skip reportlab entirely::
+
+    MD_TO_PDF_SKIP_BUILTIN=1
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_MD_SUFFIXES = frozenset({".md", ".markdown"})
+_DEFAULT_TIMEOUT_SEC = 180
+
+# CJK-first stack so Chrome prints Chinese without tofu boxes.
+_CJK_STYLESHEET = """
+@page { size: A4; margin: 16mm 14mm; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Micro Hei",
+    "Segoe UI", sans-serif;
+  font-size: 11pt;
+  line-height: 1.65;
+  color: #1a1a1a;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+h1, h2, h3, h4 {
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 1.1em 0 0.45em;
+}
+h1 { font-size: 1.55em; border-bottom: 1px solid #ddd; padding-bottom: 0.25em; }
+h2 { font-size: 1.3em; }
+h3 { font-size: 1.12em; }
+p, ul, ol, table, blockquote, pre { margin: 0.55em 0; }
+ul, ol { padding-left: 1.4em; }
+li { margin: 0.2em 0; }
+code {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: 0.9em;
+  background: #f4f4f5;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+pre {
+  background: #f6f8fa;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+pre code { background: transparent; padding: 0; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.95em;
+}
+th, td {
+  border: 1px solid #d1d5db;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: #f3f4f6; font-weight: 600; }
+blockquote {
+  border-left: 3px solid #d1d5db;
+  margin-left: 0;
+  padding: 0.2em 0 0.2em 0.9em;
+  color: #4b5563;
+}
+hr { border: none; border-top: 1px solid #d1d5db; margin: 1.2em 0; }
+strong { font-weight: 600; }
+a { color: #1d4ed8; text-decoration: none; }
+"""
+
+_PDF_OPTIONS = {
+    "format": "A4",
+    "printBackground": True,
+    "margin": {
+        "top": "14mm",
+        "bottom": "14mm",
+        "left": "12mm",
+        "right": "12mm",
+    },
+}
+
+_CHROME_CANDIDATES = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/usr/local/bin/chromium",
+)
+
+
+def _find_chrome_executable() -> str | None:
+    """Locate a system Chrome/Chromium for Puppeteer (avoid missing npx cache)."""
+    for key in ("MD_TO_PDF_CHROME", "PUPPETEER_EXECUTABLE_PATH"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw and Path(raw).is_file():
+            return raw
+    for path in _CHROME_CANDIDATES:
+        if Path(path).is_file():
+            return path
+    for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found and Path(found).is_file():
+            return found
+    return None
+
+
+def is_markdown_filename(file_name: str) -> bool:
+    """Return whether ``file_name`` looks like a Markdown document."""
+    return Path(file_name or "").suffix.lower() in _MD_SUFFIXES
+
+
+def markdown_filename_to_pdf(file_name: str) -> str:
+    """Replace a Markdown suffix with ``.pdf``."""
+    path = Path(file_name or "document.md")
+    stem = path.stem or "document"
+    return f"{stem}.pdf"
+
+
+def _safe_basename(file_name: str) -> str:
+    name = Path(file_name or "document.md").name
+    name = re.sub(r"[^\w.\u4e00-\u9fff\-]+", "_", name, flags=re.UNICODE)
+    return name or "document.md"
+
+
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _try_reportlab_inprocess(data: bytes, file_name: str) -> bytes | None:
+    """Bundled reportlab converter (last-resort fallback)."""
+    try:
+        from .md2pdf import convert_bytes
+
+        return convert_bytes(data, file_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("in-process agentscope-md2pdf unavailable: %s", exc)
+        return None
+
+
+def _chrome_md_to_pdf_cmd(
+    md_path: Path,
+    *,
+    stylesheet: Path | None,
+    document_title: str | None = None,
+) -> list[str] | None:
+    """Build ``md-to-pdf`` / ``npx md-to-pdf`` with CJK stylesheet + local Chrome."""
+    pdf_opts = json.dumps(_PDF_OPTIONS, ensure_ascii=False)
+    extras: list[str] = [
+        "--pdf-options",
+        pdf_opts,
+    ]
+    if stylesheet is not None:
+        extras.extend(["--stylesheet", str(stylesheet)])
+    if document_title:
+        extras.extend(["--document-title", document_title])
+
+    chrome_bin = _find_chrome_executable()
+    if chrome_bin:
+        launch = {
+            "executablePath": chrome_bin,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+        }
+        extras.extend(
+            [
+                "--launch-options",
+                json.dumps(launch, ensure_ascii=False),
+            ],
+        )
+    else:
+        logger.warning(
+            "md-to-pdf: no system Chrome found; Puppeteer may fail unless "
+            "Chrome was installed via `npx puppeteer browsers install chrome`. "
+            "Set MD_TO_PDF_CHROME to an executable path.",
+        )
+
+    if shutil.which("md-to-pdf"):
+        return ["md-to-pdf", str(md_path), *extras]
+    if shutil.which("npx"):
+        # --cache: isolate from broken ~/.npm (root-owned cache → EACCES).
+        return [
+            "npx",
+            "--yes",
+            "--cache",
+            str(md_path.parent / "npm-cache"),
+            "md-to-pdf",
+            str(md_path),
+            *extras,
+        ]
+    return None
+
+
+def _candidate_commands(
+    md_path: Path,
+    pdf_path: Path,
+    *,
+    stylesheet: Path | None,
+    prefer_builtin: bool,
+    document_title: str | None = None,
+) -> list[list[str]]:
+    """Build ordered converter command lines."""
+    cmds: list[list[str]] = []
+    custom = (os.environ.get("MD_TO_PDF_CMD") or "").strip()
+    if custom:
+        rendered = custom.format(input=str(md_path), output=str(pdf_path))
+        cmds.append(["/bin/sh", "-c", rendered])
+
+    chrome = _chrome_md_to_pdf_cmd(
+        md_path,
+        stylesheet=stylesheet,
+        document_title=document_title,
+    )
+    reportlab_cmds: list[list[str]] = []
+    if shutil.which("agentscope-md2pdf"):
+        reportlab_cmds.append(
+            ["agentscope-md2pdf", str(md_path), "-o", str(pdf_path)],
+        )
+    reportlab_cmds.append(
+        [
+            sys.executable,
+            "-m",
+            "agentscope.app.channel._dingtalk.md2pdf",
+            str(md_path),
+            "-o",
+            str(pdf_path),
+        ],
+    )
+
+    if prefer_builtin:
+        cmds.extend(reportlab_cmds)
+        if chrome:
+            cmds.append(chrome)
+    else:
+        if chrome:
+            cmds.append(chrome)
+        if shutil.which("pandoc"):
+            cmds.append(["pandoc", str(md_path), "-o", str(pdf_path)])
+        # reportlab runs in-process as last resort in convert_markdown_to_pdf
+        # (avoid spawning a redundant python -m md2pdf CLI).
+
+    if prefer_builtin and shutil.which("pandoc"):
+        cmds.append(["pandoc", str(md_path), "-o", str(pdf_path)])
+
+    if shutil.which("uvx"):
+        cmds.append(["uvx", "--from", "mdpdf", "mdpdf", str(md_path)])
+    return cmds
+
+
+def convert_markdown_to_pdf(data: bytes, file_name: str = "document.md") -> bytes:
+    """Convert UTF-8 Markdown bytes to PDF.
+
+    Default: headless Chrome via ``md-to-pdf``, then pandoc, then reportlab.
+
+    Raises:
+        RuntimeError: When no converter is available or all attempts fail.
+    """
+    prefer_builtin = _env_flag("MD_TO_PDF_PREFER_BUILTIN")
+    skip_builtin = _env_flag("MD_TO_PDF_SKIP_BUILTIN")
+    timeout = int(os.environ.get("MD_TO_PDF_TIMEOUT_SEC") or _DEFAULT_TIMEOUT_SEC)
+
+    if prefer_builtin and not skip_builtin:
+        built = _try_reportlab_inprocess(data, file_name)
+        if built:
+            return built
+
+    with tempfile.TemporaryDirectory(prefix="md2pdf-") as tmp:
+        tmp_path = Path(tmp)
+        safe = _safe_basename(file_name)
+        if Path(safe).suffix.lower() not in _MD_SUFFIXES:
+            safe = f"{Path(safe).stem or 'document'}.md"
+        md_path = tmp_path / "document.md"
+        pdf_path = md_path.with_suffix(".pdf")
+        md_path.write_bytes(data)
+
+        stylesheet = tmp_path / "md-to-pdf-cjk.css"
+        stylesheet.write_text(_CJK_STYLESHEET, encoding="utf-8")
+
+        doc_title = Path(safe).stem or "document"
+        commands = _candidate_commands(
+            md_path,
+            pdf_path,
+            stylesheet=stylesheet,
+            prefer_builtin=prefer_builtin,
+            document_title=doc_title,
+        )
+        errors: list[str] = []
+        chrome_bin = _find_chrome_executable()
+        run_env = dict(os.environ)
+        if chrome_bin:
+            run_env.setdefault("PUPPETEER_EXECUTABLE_PATH", chrome_bin)
+        # Avoid broken/root-owned ~/.npm cache (common EACCES with npx).
+        npm_cache = tmp_path / "npm-cache"
+        npm_cache.mkdir(exist_ok=True)
+        run_env["npm_config_cache"] = str(npm_cache)
+        run_env["NPM_CONFIG_CACHE"] = str(npm_cache)
+        for cmd in commands:
+            try:
+                logger.info("Markdown→PDF via %s", " ".join(cmd[:6]))
+                proc = subprocess.run(
+                    cmd,
+                    check=False,
+                    capture_output=True,
+                    timeout=timeout,
+                    cwd=str(tmp_path),
+                    env=run_env,
+                )
+                if proc.returncode != 0:
+                    err = (proc.stderr or proc.stdout or b"").decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+                    # Prefer the tail — npm warnings often precede the real error.
+                    err_tail = err.strip()[-800:] if err.strip() else f"exit {proc.returncode}"
+                    logger.warning(
+                        "Markdown→PDF command failed (%s): %s",
+                        cmd[0],
+                        err_tail,
+                    )
+                    errors.append(f"{cmd[0]}: {err_tail}")
+                    continue
+                if pdf_path.is_file() and pdf_path.stat().st_size > 0:
+                    return pdf_path.read_bytes()
+                found = list(tmp_path.glob("*.pdf"))
+                if found:
+                    return found[0].read_bytes()
+                errors.append(f"{cmd[0]}: completed but no PDF written")
+            except subprocess.TimeoutExpired:
+                errors.append(f"{cmd[0]}: timed out after {timeout}s")
+            except OSError as exc:
+                errors.append(f"{cmd[0]}: {exc}")
+
+        if not skip_builtin and not prefer_builtin:
+            built = _try_reportlab_inprocess(data, file_name)
+            if built:
+                logger.warning(
+                    "Markdown→PDF fell back to reportlab after Chrome/CLI "
+                    "failures: %s",
+                    " | ".join(errors[:3]) if errors else "no CLI",
+                )
+                return built
+
+        raise RuntimeError(
+            "Markdown→PDF failed. Install Node and run "
+            "`npx --yes md-to-pdf`, or set MD_TO_PDF_CMD / install pandoc. "
+            + (" | ".join(errors) if errors else ""),
+        )
+
+
+def maybe_convert_markdown_attachment(
+    data: bytes,
+    file_name: str,
+    media_type: str = "",
+) -> tuple[bytes, str, str]:
+    """If ``file_name`` / media type is Markdown, return PDF bytes and meta."""
+    media = (media_type or "").lower()
+    if not (
+        is_markdown_filename(file_name)
+        or media in {"text/markdown", "text/x-markdown"}
+    ):
+        return data, file_name, media_type or "application/octet-stream"
+    pdf = convert_markdown_to_pdf(data, file_name)
+    return pdf, markdown_filename_to_pdf(file_name), "application/pdf"

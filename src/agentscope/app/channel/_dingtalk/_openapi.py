@@ -109,7 +109,27 @@ class _DingTalkOpenAPI:
             `bool`: Whether DingTalk accepted both upload and send calls.
         """
         is_image = media_type.startswith("image/")
-        suffix = file_name.rsplit(".", 1)[-1].lower()
+        suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        media_l = (media_type or "").lower()
+        if not is_image and (
+            suffix in {"md", "markdown"}
+            or media_l in {"text/markdown", "text/x-markdown"}
+        ):
+            try:
+                from ._markdown_pdf import maybe_convert_markdown_attachment
+
+                data, file_name, media_type = maybe_convert_markdown_attachment(
+                    data,
+                    file_name if suffix in {"md", "markdown"} else f"{file_name}.md",
+                    media_type,
+                )
+                suffix = file_name.rsplit(".", 1)[-1].lower()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "DingTalk Markdown→PDF conversion failed for %s",
+                    file_name,
+                )
+                return False
         if not is_image and suffix not in _SUPPORTED_FILE_TYPES:
             logger.warning(
                 "DingTalk does not support outbound '.%s' files",
