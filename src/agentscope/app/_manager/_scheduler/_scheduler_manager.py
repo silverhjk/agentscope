@@ -226,6 +226,7 @@ class SchedulerManager:
                             session_id=stateful_session_id,
                         )
                     ),
+                    name=record.data.name or "定时执行",
                     chat_model_config=record.data.chat_model_config,
                 )
                 session = await storage.upsert_session(
@@ -265,6 +266,7 @@ class SchedulerManager:
                             session_id=_generate_id(),
                         )
                     ),
+                    name=record.data.name or "定时执行",
                     chat_model_config=record.data.chat_model_config,
                 ),
                 state=state,
