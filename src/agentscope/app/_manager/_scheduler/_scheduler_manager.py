@@ -459,6 +459,12 @@ class SchedulerManager:
             return
 
         desired = {r.id: r for r in records if r.data.enabled}
+        logger.info(
+            "Schedule reconcile: %d total, %d enabled, %d registered",
+            len(records),
+            len(desired),
+            len(self._versions),
+        )
 
         for schedule_id in set(self._versions) - set(desired):
             self._remove_job(schedule_id)

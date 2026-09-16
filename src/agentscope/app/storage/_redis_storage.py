@@ -1288,7 +1288,12 @@ class RedisStorage(StorageBase):
         )
         records = []
         for entry in entries:
-            user_id, schedule_id = entry.split(":", 1)
+            # user_id may itself contain ":" (e.g. "tenant:de:42");
+            # schedule ids are colon-free uuids, so split from the right.
+            try:
+                user_id, schedule_id = entry.rsplit(":", 1)
+            except ValueError:
+                continue
             raw = await self._client.get(
                 self._key(
                     self.key_config.schedule,

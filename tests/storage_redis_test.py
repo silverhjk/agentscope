@@ -675,6 +675,16 @@ class TestScheduleSession(IsolatedAsyncioTestCase):
         )
         self.assertEqual(results, [])
 
+    async def test_list_all_schedules_with_colon_user_id(self) -> None:
+        """Global index must survive user ids that themselves contain ':'."""
+        owner = "wlsjkj:de:42"
+        schedule = make_schedule_record(owner, self.agent_id)
+        await self.storage.upsert_schedule(owner, schedule)
+
+        all_schedules = await self.storage.list_all_schedules()
+        self.assertEqual([s.id for s in all_schedules], [schedule.id])
+        self.assertEqual(all_schedules[0].user_id, owner)
+
     async def test_schedule_session_also_in_agent_index(self) -> None:
         """A schedule-created session appears in both the schedule and agent
         session indexes."""
