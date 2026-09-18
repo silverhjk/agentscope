@@ -5,8 +5,10 @@ Preferred order (Chrome first for real Markdown fidelity):
 
 1. Env ``MD_TO_PDF_CMD`` (``{input}`` / ``{output}``)
 2. ``md-to-pdf`` / ``npx --yes md-to-pdf`` (headless Chrome / Puppeteer)
+   — skipped when no Chrome unless ``MD_TO_PDF_ALLOW_PUPPETEER_DOWNLOAD=1``
 3. ``pandoc``
-4. ``agentscope-md2pdf`` (reportlab CLI / in-process) — last-resort fallback
+4. ``mdpdf`` (PyMuPDF CLI, requires ``-o``)
+5. ``agentscope-md2pdf`` (reportlab) — last-resort fallback
 
 Force reportlab-first (legacy)::
 
@@ -15,6 +17,10 @@ Force reportlab-first (legacy)::
 Skip reportlab entirely::
 
     MD_TO_PDF_SKIP_BUILTIN=1
+
+Production tip: install ``chromium`` in the runtime image and set::
+
+    MD_TO_PDF_CHROME=/usr/bin/chromium
 """
 from __future__ import annotations
 
@@ -26,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from glob import glob as _glob_paths
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -120,23 +127,49 @@ _CHROME_CANDIDATES = (
     "/usr/bin/chromium-browser",
     "/usr/bin/chromium",
     "/usr/local/bin/chromium",
+    "/usr/lib/chromium/chromium",
+    "/opt/google/chrome/chrome",
+    "/headless-shell/headless_shell",
 )
 
 
 def _find_chrome_executable() -> str | None:
     """Locate a system Chrome/Chromium for Puppeteer (avoid missing npx cache)."""
-    for key in ("MD_TO_PDF_CHROME", "PUPPETEER_EXECUTABLE_PATH"):
+    for key in ("MD_TO_PDF_CHROME", "PUPPETEER_EXECUTABLE_PATH", "CHROME_PATH"):
         raw = (os.environ.get(key) or "").strip()
         if raw and Path(raw).is_file():
             return raw
     for path in _CHROME_CANDIDATES:
         if Path(path).is_file():
             return path
-    for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"):
+    # Playwright / Puppeteer cache layouts (versioned dirs).
+    for pattern in (
+        "/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/root/.cache/puppeteer/chrome/*/chrome-linux64/chrome",
+        "/home/*/.cache/puppeteer/chrome/*/chrome-linux64/chrome",
+    ):
+        try:
+            for match in sorted(_glob_paths(pattern)):
+                if Path(match).is_file():
+                    return match
+        except OSError:
+            continue
+    for name in (
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+    ):
         found = shutil.which(name)
         if found and Path(found).is_file():
             return found
     return None
+
+
+def _allow_puppeteer_download() -> bool:
+    """Whether to run npx md-to-pdf when no system Chrome is present (slow / often hangs)."""
+    return _env_flag("MD_TO_PDF_ALLOW_PUPPETEER_DOWNLOAD")
 
 
 def is_markdown_filename(file_name: str) -> bool:
@@ -183,7 +216,20 @@ def _chrome_md_to_pdf_cmd(
     stylesheet: Path | None,
     document_title: str | None = None,
 ) -> list[str] | None:
-    """Build ``md-to-pdf`` / ``npx md-to-pdf`` with CJK stylesheet + local Chrome."""
+    """Build ``md-to-pdf`` / ``npx md-to-pdf`` with CJK stylesheet + local Chrome.
+
+    Without a Chrome binary, skip unless ``MD_TO_PDF_ALLOW_PUPPETEER_DOWNLOAD=1`` —
+    otherwise ``npx`` often hangs ~minutes downloading Chromium and then fails.
+    """
+    chrome_bin = _find_chrome_executable()
+    if not chrome_bin and not _allow_puppeteer_download():
+        logger.warning(
+            "md-to-pdf: no system Chrome found; skipping (set MD_TO_PDF_CHROME "
+            "or install chromium). To allow Puppeteer auto-download set "
+            "MD_TO_PDF_ALLOW_PUPPETEER_DOWNLOAD=1.",
+        )
+        return None
+
     pdf_opts = json.dumps(_PDF_OPTIONS, ensure_ascii=False)
     extras: list[str] = [
         "--pdf-options",
@@ -194,7 +240,6 @@ def _chrome_md_to_pdf_cmd(
     if document_title:
         extras.extend(["--document-title", document_title])
 
-    chrome_bin = _find_chrome_executable()
     if chrome_bin:
         launch = {
             "executablePath": chrome_bin,
@@ -208,9 +253,8 @@ def _chrome_md_to_pdf_cmd(
         )
     else:
         logger.warning(
-            "md-to-pdf: no system Chrome found; Puppeteer may fail unless "
-            "Chrome was installed via `npx puppeteer browsers install chrome`. "
-            "Set MD_TO_PDF_CHROME to an executable path.",
+            "md-to-pdf: no system Chrome; relying on Puppeteer download "
+            "(MD_TO_PDF_ALLOW_PUPPETEER_DOWNLOAD=1).",
         )
 
     if shutil.which("md-to-pdf"):
@@ -265,6 +309,28 @@ def _candidate_commands(
         ],
     )
 
+    # mdpdf (PyMuPDF) — requires --output; better structure than bare reportlab
+    # but limited CJK fonts. Prefer after Chrome/pandoc.
+    mdpdf_cmds: list[list[str]] = []
+    if shutil.which("mdpdf"):
+        mdpdf_cmds.append(
+            ["mdpdf", "-o", str(pdf_path), "-p", "A4", str(md_path)],
+        )
+    if shutil.which("uvx"):
+        mdpdf_cmds.append(
+            [
+                "uvx",
+                "--from",
+                "mdpdf",
+                "mdpdf",
+                "-o",
+                str(pdf_path),
+                "-p",
+                "A4",
+                str(md_path),
+            ],
+        )
+
     if prefer_builtin:
         cmds.extend(reportlab_cmds)
         if chrome:
@@ -274,14 +340,14 @@ def _candidate_commands(
             cmds.append(chrome)
         if shutil.which("pandoc"):
             cmds.append(["pandoc", str(md_path), "-o", str(pdf_path)])
+        cmds.extend(mdpdf_cmds)
         # reportlab runs in-process as last resort in convert_markdown_to_pdf
-        # (avoid spawning a redundant python -m md2pdf CLI).
 
     if prefer_builtin and shutil.which("pandoc"):
         cmds.append(["pandoc", str(md_path), "-o", str(pdf_path)])
+    if prefer_builtin:
+        cmds.extend(mdpdf_cmds)
 
-    if shutil.which("uvx"):
-        cmds.append(["uvx", "--from", "mdpdf", "mdpdf", str(md_path)])
     return cmds
 
 
