@@ -18,7 +18,10 @@ class CreateScheduleRequest(BaseModel):
     description: str = Field(default="", description="Optional description.")
 
     cron_expression: str = Field(
-        description="Standard 5-field cron expression, e.g. '0 9 * * 1-5'.",
+        description=(
+            "5-field cron (APScheduler day_of_week: 0=Mon … 4=Fri; "
+            "prefer names). e.g. '0 9 * * fri', '50 17 * * mon-fri'."
+        ),
     )
 
     timezone: str = Field(

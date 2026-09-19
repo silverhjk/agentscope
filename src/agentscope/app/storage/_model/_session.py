@@ -168,7 +168,10 @@ class SessionConfig(BaseModel):
     model fails. None means no fallback configured."""
 
     tts_model_config: TTSModelConfig | None = None
-    """The TTS model config. None means TTS is not enabled."""
+    """Non-realtime TTS. None means TTS is not enabled for this session."""
+
+    tts_realtime_model_config: TTSModelConfig | None = None
+    """Realtime / streaming TTS (e.g. Xiaozhi). None means not configured."""
 
     knowledge_config: SessionKnowledgeConfig | None = None
     """Knowledge bases attached to this session and the corresponding

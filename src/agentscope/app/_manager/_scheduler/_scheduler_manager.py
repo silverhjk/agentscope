@@ -195,6 +195,19 @@ class SchedulerManager:
         message_bus = self._message_bus
         workspace_manager = self._workspace_manager
 
+        creator_channel_id = (record.data.creator_channel_id or "").strip() or None
+        creator_chat_id = (record.data.creator_chat_id or "").strip() or None
+        creator_name = (record.data.creator_display_name or "").strip() or None
+        if not creator_chat_id and (record.data.creator_external_id or "").strip():
+            creator_chat_id = f"user:{record.data.creator_external_id.strip()}"
+        if not (record.data.creator_external_id or "").strip():
+            logger.warning(
+                "[Schedule:%s(%s)] No creator_external_id; "
+                "DingTalk/Feishu tools may lack an actor identity",
+                record.id,
+                record.data.name,
+            )
+
         if record.data.stateful:
             stateful_session_id = f"{record.id}_stateful"
             logger.info(
@@ -237,6 +250,9 @@ class SchedulerManager:
                     session_id=stateful_session_id,
                     source=SessionSource.SCHEDULE,
                     source_schedule_id=record.id,
+                    source_channel_id=creator_channel_id,
+                    source_chat_id=creator_chat_id,
+                    source_chat_name=creator_name,
                 )
             else:
                 logger.info(
@@ -245,6 +261,20 @@ class SchedulerManager:
                     record.data.name,
                     session.id,
                 )
+                # Refresh actor identity if creator was recorded after first fire.
+                if creator_channel_id or creator_chat_id:
+                    session = await storage.upsert_session(
+                        user_id=record.user_id,
+                        agent_id=record.agent_id,
+                        config=session.config,
+                        state=session.state,
+                        session_id=session.id,
+                        source=SessionSource.SCHEDULE,
+                        source_schedule_id=record.id,
+                        source_channel_id=creator_channel_id,
+                        source_chat_id=creator_chat_id,
+                        source_chat_name=creator_name,
+                    )
         else:
             logger.info(
                 "[Schedule:%s(%s)] Non-stateful mode, creating fresh session",
@@ -272,6 +302,9 @@ class SchedulerManager:
                 state=state,
                 source=SessionSource.SCHEDULE,
                 source_schedule_id=record.id,
+                source_channel_id=creator_channel_id,
+                source_chat_id=creator_chat_id,
+                source_chat_name=creator_name,
             )
 
         logger.info(
@@ -286,13 +319,21 @@ class SchedulerManager:
             hint=(
                 f"<scheduled-task>\n"
                 f"{record.data.description}\n"
-                f"</scheduled-task>"
+                f"</scheduled-task>\n"
+                f"<schedule-actor>\n"
+                f"Act as creator "
+                f"{record.data.creator_display_name or record.data.creator_external_id or 'unknown'} "
+                f"(id={record.data.creator_external_id or ''}) when calling "
+                f"DingTalk / Feishu / business tools. Do not invent another user.\n"
+                f"</schedule-actor>"
             ),
             source=json.dumps(
                 {
                     "label": "schedule",
                     "sublabel": record.data.name,
                     "reason": reason,
+                    "creatorExternalId": record.data.creator_external_id or "",
+                    "creatorDisplayName": record.data.creator_display_name or "",
                 },
                 ensure_ascii=False,
             ),
@@ -626,6 +667,7 @@ class SchedulerManager:
             ),
             ScheduleDelete(
                 user_id=user_id,
+                agent_id=agent_id,
                 scheduler=self._scheduler,
                 storage=self._storage,
                 message_bus=self._message_bus,

@@ -11,9 +11,11 @@ from .....permission import (
     PermissionDecision,
     PermissionBehavior,
 )
+from .....state import AgentState
 from .....tool import ToolBase, ToolChunk
 from ....message_bus import MessageBus
 from ....storage._base import StorageBase
+from .._creator import resolve_creator_from_session, same_creator
 
 
 class _ScheduleDeleteParams(BaseModel):
@@ -31,20 +33,24 @@ class ScheduleDelete(ToolBase):
     storage, and the message bus. Every execution session spawned by
     the schedule is cancelled (if running) and has its bus state
     purged. The job cannot be recovered after removal.
+
+    Only the schedule's recorded creator may delete it.
     """
 
     name: str = "ScheduleDelete"
 
     description: str = (
         "Permanently delete a scheduled task by its schedule ID. "
-        "After this call the task will no longer be executed and its record "
-        "will be deleted from storage."
+        "Only the **creator** of that schedule may delete it; if someone "
+        "else asks, refuse and tell them to ask the creator. "
+        "After a successful call the task will no longer run and its "
+        "record is removed from storage."
     )
     input_schema: dict = _ScheduleDeleteParams.model_json_schema()
 
     is_concurrency_safe: bool = False
     is_read_only: bool = False
-    is_state_injected: bool = False
+    is_state_injected: bool = True
     is_external_tool: bool = False
     is_mcp: bool = False
     mcp_name: str | None = None
@@ -52,6 +58,7 @@ class ScheduleDelete(ToolBase):
     def __init__(
         self,
         user_id: str,
+        agent_id: str,
         scheduler: Any,
         storage: StorageBase,
         message_bus: MessageBus,
@@ -61,6 +68,8 @@ class ScheduleDelete(ToolBase):
         Args:
             user_id (`str`):
                 The authenticated user; used to scope the storage deletion.
+            agent_id (`str`):
+                Current agent id (needed to resolve the speaking peer).
             scheduler (`Any`):
                 The ``AsyncIOScheduler`` instance whose job will be removed.
             storage (`StorageBase`):
@@ -71,6 +80,7 @@ class ScheduleDelete(ToolBase):
                 purge their per-session bus state.
         """
         self._user_id = user_id
+        self._agent_id = agent_id
         self._scheduler = scheduler
         self._storage = storage
         self._message_bus = message_bus
@@ -89,24 +99,69 @@ class ScheduleDelete(ToolBase):
     async def __call__(
         self,
         schedule_id: str,
+        _agent_state: AgentState | None = None,
     ) -> ToolChunk:  # type: ignore[override]
         """Permanently delete the scheduled task with the given ID.
-
-        Delegates the storage + bus cascade to
-        :meth:`SessionService.delete_schedule`, which cancels in-flight
-        runs for any session this schedule spawned and purges their
-        bus state before dropping the schedule record. The APScheduler
-        job is removed separately because it lives in-process and the
-        service layer is bus/storage-only.
 
         Args:
             schedule_id (`str`):
                 The unique identifier of the schedule to delete.
+            _agent_state (`AgentState | None`, optional):
+                Injected agent state; used to resolve the current speaker.
 
         Returns:
             `ToolChunk`:
                 A chunk describing the result of the delete operation.
         """
+        record = await self._storage.get_schedule(self._user_id, schedule_id)
+        if record is None:
+            return ToolChunk(
+                content=[
+                    TextBlock(
+                        text=(
+                            f"ScheduleNotFoundError: Schedule with id "
+                            f"{schedule_id!r} not found in storage."
+                        ),
+                    ),
+                ],
+                state=ToolResultState.ERROR,
+            )
+
+        creator_id = (record.data.creator_external_id or "").strip()
+        if creator_id:
+            session_id = (
+                _agent_state.session_id if _agent_state is not None else ""
+            )
+            (
+                peer_id,
+                peer_name,
+                _,
+                _,
+            ) = await resolve_creator_from_session(
+                self._storage,
+                self._user_id,
+                self._agent_id,
+                session_id,
+            )
+            if not same_creator(creator_id, peer_id):
+                creator_label = (
+                    record.data.creator_display_name or creator_id
+                )
+                speaker = peer_name or peer_id or "(unknown)"
+                return ToolChunk(
+                    content=[
+                        TextBlock(
+                            text=(
+                                f"ScheduleDeleteDenied: only the creator "
+                                f"({creator_label}) may delete or change "
+                                f"this schedule. Current speaker={speaker}. "
+                                f"Ask the creator to delete it, or create "
+                                f"a new schedule under your own identity."
+                            ),
+                        ),
+                    ],
+                    state=ToolResultState.ERROR,
+                )
 
         # Remove from the in-memory scheduler (best-effort; may already be
         # absent if the job finished naturally or the server restarted)

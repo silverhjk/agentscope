@@ -61,7 +61,10 @@ class ScheduleData(BaseModel):
     )
 
     cron_expression: str = Field(
-        description="Standard 5-field cron expression, e.g. '0 9 * * 1-5'.",
+        description=(
+            "5-field cron (APScheduler day_of_week: 0=Mon … 4=Fri … 6=Sun; "
+            "prefer mon/tue/…/sun). e.g. '0 9 * * fri', '50 17 * * mon-fri'."
+        ),
     )
 
     started_at: datetime = Field(
@@ -102,6 +105,36 @@ class ScheduleData(BaseModel):
         default="",
         description="The source session identifier, used for resource "
         "retrieval.",
+    )
+
+    creator_external_id: str = Field(
+        default="",
+        description=(
+            "Immutable real-user id of who created this schedule "
+            "(DingTalk/Feishu staff id or admin actor). Used as the actor "
+            "identity when the schedule fires. Empty for legacy schedules."
+        ),
+    )
+
+    creator_display_name: str = Field(
+        default="",
+        description="Display name of the schedule creator (immutable).",
+    )
+
+    creator_channel_id: str = Field(
+        default="",
+        description=(
+            "Channel id of the creating session (e.g. dingtalk / feishu / "
+            "admin). Copied onto fire sessions so tools can resolve the peer."
+        ),
+    )
+
+    creator_chat_id: str = Field(
+        default="",
+        description=(
+            "Chat id used for peer resolution on fire, typically "
+            "``user:{creator_external_id}``."
+        ),
     )
 
 

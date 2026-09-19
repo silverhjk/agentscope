@@ -119,6 +119,9 @@ async def create_schedule(
             chat_model_config=body.chat_model_config,
             source=ScheduleSource.USER,
             started_at=datetime.now(),
+            creator_external_id=user_id,
+            creator_display_name="",
+            creator_chat_id=f"user:{user_id}",
         ),
     )
 
@@ -179,6 +182,15 @@ async def update_schedule(
         )
 
     updates = body.model_dump(exclude_none=True)
+    # Creator identity is immutable after create.
+    for key in (
+        "creator_external_id",
+        "creator_display_name",
+        "creator_channel_id",
+        "creator_chat_id",
+        "source_session_id",
+    ):
+        updates.pop(key, None)
     updated_data = existing.data.model_copy(update=updates)
     updated_record = existing.model_copy(
         update={"data": updated_data, "updated_at": datetime.now()},

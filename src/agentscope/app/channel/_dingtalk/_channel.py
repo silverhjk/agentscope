@@ -1105,6 +1105,9 @@ class DingTalkChannel(ChannelBase):
         media_type = block.source.media_type or "application/octet-stream"
         if media_type.startswith("image/"):
             fallback_name = "image.png"
+        elif media_type.startswith("audio/"):
+            ext = mimetypes.guess_extension(media_type) or ".wav"
+            fallback_name = f"reply{ext}"
         else:
             extension = mimetypes.guess_extension(media_type) or ""
             fallback_name = f"file{extension}"

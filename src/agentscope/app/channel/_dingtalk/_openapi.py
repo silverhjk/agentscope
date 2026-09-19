@@ -18,6 +18,26 @@ _TOKEN_REFRESH_BUFFER_SECONDS = 300
 # rejected payload is echoed back into the log.
 _ERROR_BODY_CHARS = 500
 _SUPPORTED_FILE_TYPES = frozenset({"doc", "docx", "pdf", "rar", "xlsx", "zip"})
+_AUDIO_SUFFIXES = frozenset({"wav", "mp3", "amr", "ogg", "m4a", "aac"})
+
+
+def _estimate_audio_duration_seconds(data: bytes, media_type: str) -> int:
+    """Best-effort duration for DingTalk sampleAudio (seconds, ≥1)."""
+    media = (media_type or "").lower()
+    if "wav" in media or (len(data) > 44 and data[:4] == b"RIFF"):
+        try:
+            import io
+            import wave
+
+            with wave.open(io.BytesIO(data), "rb") as wav:
+                frames = wav.getnframes()
+                rate = wav.getframerate() or 16000
+                if rate > 0 and frames > 0:
+                    return max(1, int(round(frames / float(rate))))
+        except Exception:  # noqa: BLE001
+            pass
+    # Rough PCM/mp3 fallback (~16kHz mono 16-bit ≈ 32KB/s).
+    return max(1, int(round(len(data) / 32000.0)))
 # An AI card's creation call carries no content: it opens the card in
 # a running state, and the update that follows tells it what to render.
 # "Done rendering" is about the card's own progress, not about whether
@@ -110,6 +130,7 @@ class _DingTalkOpenAPI:
         """
         is_image = media_type.startswith("image/")
         suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        is_audio = media_type.startswith("audio/") or suffix in _AUDIO_SUFFIXES
         media_l = (media_type or "").lower()
         if not is_image and (
             suffix in {"md", "markdown"}
@@ -130,6 +151,8 @@ class _DingTalkOpenAPI:
                     file_name,
                 )
                 return False
+        if is_audio:
+            return await self._send_audio(chat_id, data, file_name, media_type)
         if not is_image and suffix not in _SUPPORTED_FILE_TYPES:
             logger.warning(
                 "DingTalk does not support outbound '.%s' files",
@@ -155,6 +178,52 @@ class _DingTalkOpenAPI:
                 "fileType": suffix,
             }
         return await self._send_message(chat_id, msg_key, msg_param)
+
+    async def _send_audio(
+        self,
+        chat_id: str,
+        data: bytes,
+        file_name: str,
+        media_type: str,
+    ) -> bool:
+        """Upload voice media and send as a DingTalk audio message."""
+        suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "wav"
+        if "." not in file_name:
+            file_name = f"{file_name or 'reply'}.{suffix or 'wav'}"
+        media_id = await self._upload_media(
+            data,
+            file_name,
+            media_type or "audio/wav",
+            "voice",
+        )
+        if media_id is None:
+            # Fallback: some tenants only allow file upload for wav.
+            media_id = await self._upload_media(
+                data,
+                file_name,
+                media_type or "audio/wav",
+                "file",
+            )
+            if media_id is None:
+                return False
+            return await self._send_message(
+                chat_id,
+                "sampleFile",
+                {
+                    "mediaId": media_id,
+                    "fileName": file_name,
+                    "fileType": suffix or "wav",
+                },
+            )
+        duration = _estimate_audio_duration_seconds(data, media_type)
+        return await self._send_message(
+            chat_id,
+            "sampleAudio",
+            {
+                "mediaId": media_id,
+                "duration": str(max(1, duration)),
+            },
+        )
 
     async def send_text(self, chat_id: str, text: str) -> bool:
         """Send Markdown-formatted text to an encoded target.

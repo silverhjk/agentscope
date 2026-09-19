@@ -20,6 +20,7 @@ from ....storage import (
     ScheduleSource,
     ChatModelConfig,
 )
+from .._creator import resolve_creator_from_session
 
 
 class _ScheduleCreateParams(BaseModel):
@@ -33,7 +34,14 @@ class _ScheduleCreateParams(BaseModel):
     )
 
     cron_expression: str = Field(
-        description="Standard 5-field cron expression, e.g. '0 9 * * 1-5'.",
+        description=(
+            "5-field cron (minute hour day month day_of_week), evaluated by "
+            "APScheduler. day_of_week: 0=Mon … 4=Fri … 6=Sun (NOT Unix crontab "
+            "where 0=Sun). Prefer names: mon,tue,wed,thu,fri,sat,sun. "
+            "Examples: '0 9 * * fri' (every Friday 09:00), "
+            "'50 17 * * mon-fri' (weekdays 17:50). Do NOT use 5 for Friday "
+            "(that is Saturday)."
+        ),
     )
 
     timezone: str = Field(
@@ -93,16 +101,35 @@ class ScheduleCreate(ToolBase):
     description: str = """Create a new recurring scheduled task for yourself. \
 You will be notified in a new session each time the schedule is triggered.
 
-**About the cron expression:**
-- Determine your current timezone first, that's very important for setting a \
-correct cron expression. Get it by bash command like `date +%z`, \
-`cat /etc/timezone` or directly ask the user.
-- Determine whether the task should run once or recur at an interval, \
-then set the cron expression accordingly.
+**Creator identity (CRITICAL):**
+- The current human speaker is recorded as the **immutable creator**.
+- When the schedule fires, you act **as that creator** for DingTalk / Feishu \
+/ business-data tools (approvals, IM, org directory, etc.).
+- Creation fails if the current session has no resolvable real-user identity.
+- Later **delete / change** of this schedule may only be instructed by the \
+**same creator**. Anyone else asking to modify it: refuse and tell them to \
+ask the creator (or recreate a new schedule under their own identity).
+
+**About the cron expression (CRITICAL — weekday numbering):**
+- Format: 5 fields `minute hour day-of-month month day-of-week`.
+- Timezone defaults to Asia/Shanghai; confirm with the user if unsure.
+- day_of_week uses **APScheduler** semantics (same as Python APScheduler \
+CronTrigger), **not** classic Unix crontab:
+  - Numbers: **0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, \
+5=Saturday, 6=Sunday**
+  - Prefer English names to avoid mistakes: `mon,tue,wed,thu,fri,sat,sun` \
+(ranges like `mon-fri` are OK).
+- Common mistakes (FORBIDDEN):
+  - Writing `5` for 周五/Friday → that is **Saturday**. Friday is `4` or `fri`.
+  - Writing `1-5` for 工作日 → that is **Tue–Sat**. Weekdays are `0-4` or \
+`mon-fri`.
+- Good examples:
+  - Every Friday 09:00 → `0 9 * * fri` (or `0 9 * * 4`)
+  - Weekdays 17:50 → `50 17 * * mon-fri` (or `50 17 * * 0-4`)
+  - Every Monday 09:00 → `0 9 * * mon` (or `0 9 * * 0`)
 - For a one-off task, query the current time first and set the cron \
-expression to fire at that specific moment.
-- Set `started_at` and `ended_at` to match the user's requirements. \
-When in doubt, ask for clarification before creating the schedule.
+expression to fire at that specific moment; set `started_at` / `ended_at` \
+when needed. When in doubt, ask before creating.
 
 **About the description field:**
 - The `description` is the only context available to you when the \
@@ -180,7 +207,8 @@ to complete the task independently.
             name (`str`):
                 Display name of the schedule.
             cron_expression (`str`):
-                Standard 5-field cron expression, e.g. ``'0 9 * * 1-5'``.
+                5-field cron; day_of_week is APScheduler style (0=Mon … 4=Fri),
+                e.g. ``'0 9 * * fri'`` or ``'50 17 * * mon-fri'``.
             description (`str`, optional):
                 Human-readable description of what this schedule does.
             timezone (`str`, optional):
@@ -214,6 +242,34 @@ to complete the task independently.
             _agent_state.session_id if _agent_state is not None else ""
         )
 
+        (
+            creator_external_id,
+            creator_display_name,
+            creator_channel_id,
+            creator_chat_id,
+        ) = await resolve_creator_from_session(
+            self._storage,
+            self._user_id,
+            self._agent_id,
+            source_session_id,
+        )
+        if not creator_external_id:
+            return ToolChunk(
+                content=[
+                    TextBlock(
+                        text=(
+                            "ScheduleCreateError: cannot resolve a real-user "
+                            "creator from the current session. Schedules must "
+                            "be created by a human (IM / console) so DingTalk "
+                            "/ Feishu tools have an actor identity at fire "
+                            "time. Ask the user to create the schedule from "
+                            "their own chat."
+                        ),
+                    ),
+                ],
+                state=ToolResultState.ERROR,
+            )
+
         record = ScheduleRecord(
             user_id=self._user_id,
             agent_id=self._agent_id,
@@ -230,6 +286,10 @@ to complete the task independently.
                 source=ScheduleSource.AGENT,
                 source_session_id=source_session_id,
                 chat_model_config=self._chat_model_config,
+                creator_external_id=creator_external_id,
+                creator_display_name=creator_display_name,
+                creator_channel_id=creator_channel_id,
+                creator_chat_id=creator_chat_id,
             ),
         )
 
@@ -237,6 +297,7 @@ to complete the task independently.
         await self._storage.upsert_schedule(self._user_id, record)
         await self._scheduler_manager.notify_changed(record.id)
 
+        creator_label = creator_display_name or creator_external_id
         return ToolChunk(
             content=[
                 TextBlock(
@@ -247,7 +308,10 @@ to complete the task independently.
                         f"Enabled: {enabled}\n"
                         f"Started at: {record.data.started_at}\n"
                         f"Ended at: {ended_at or '(no end time)'}\n"
-                        f"Stateful: {stateful}"
+                        f"Stateful: {stateful}\n"
+                        f"Creator: {creator_label} "
+                        f"({creator_external_id}) — immutable; only this "
+                        f"person may delete/change this schedule."
                     ),
                 ),
             ],

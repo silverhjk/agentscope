@@ -129,6 +129,12 @@ class SessionSettings(BaseModel):
     (``knowledge_base_ids`` + RAG ``parameters``). Copied into
     :class:`~agentscope.app.storage.SessionConfig.knowledge_config`."""
 
+    tts_model_config: dict[str, Any] | None = None
+    """Non-realtime TTS (IM voice replies). Copied into session config."""
+
+    tts_realtime_model_config: dict[str, Any] | None = None
+    """Realtime / streaming TTS (Xiaozhi device). Copied into session config."""
+
     @field_validator("permission_mode")
     @classmethod
     def _validate_permission_mode(cls, v: str) -> str:

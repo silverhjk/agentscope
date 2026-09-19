@@ -20,6 +20,8 @@ from agentscope.app.storage import (
     ScheduleRecord,
 )
 from agentscope.permission import PermissionMode
+from agentscope.state import AgentState
+from types import SimpleNamespace
 
 
 class _Access:
@@ -40,8 +42,14 @@ class _Access:
 class _Storage:
     """Record schedule writes without requiring Redis or SQL."""
 
-    def __init__(self, existing: ScheduleRecord | None = None) -> None:
+    def __init__(
+        self,
+        existing: ScheduleRecord | None = None,
+        *,
+        session: object | None = None,
+    ) -> None:
         self.existing = existing
+        self.session = session
         self.upserted: list[ScheduleRecord] = []
 
     async def get_schedule(
@@ -52,6 +60,16 @@ class _Storage:
         """Return the one fixture record."""
         _ = user_id, schedule_id
         return self.existing
+
+    async def get_session(
+        self,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+    ) -> object | None:
+        """Return creating session for creator resolution."""
+        _ = user_id, agent_id, session_id
+        return self.session
 
     async def upsert_schedule(
         self,
@@ -121,6 +139,22 @@ def _record() -> ScheduleRecord:
     )
 
 
+def _creator_session() -> SimpleNamespace:
+    """Session with a resolvable IM peer."""
+    return SimpleNamespace(
+        source_channel_id="dingtalk",
+        source_chat_id="user:staff-1",
+        source_chat_name="Alice",
+        config=SimpleNamespace(name="Dingtalk/Alice"),
+    )
+
+
+def _agent_state() -> AgentState:
+    state = AgentState()
+    state.session_id = "sess-create-1"
+    return state
+
+
 class ScheduleValidationTest(IsolatedAsyncioTestCase):
     """Invalid schedules must fail before any state mutation."""
 
@@ -139,6 +173,10 @@ class ScheduleValidationTest(IsolatedAsyncioTestCase):
 
         self.assertEqual(len(storage.upserted), 1)
         self.assertEqual(storage.upserted[0].id, response.schedule_id)
+        self.assertEqual(
+            storage.upserted[0].data.creator_external_id,
+            "user-1",
+        )
         self.assertListEqual(scheduler.notified, [response.schedule_id])
 
     async def test_create_empty_timezone_does_not_persist(self) -> None:
@@ -253,7 +291,7 @@ class ScheduleValidationTest(IsolatedAsyncioTestCase):
 
     async def test_tool_invalid_cron_does_not_persist(self) -> None:
         """The agent-facing create tool validates before writing too."""
-        storage = _Storage()
+        storage = _Storage(session=_creator_session())
         scheduler = _Scheduler()
         tool = ScheduleCreate(
             user_id="user-1",
@@ -264,13 +302,17 @@ class ScheduleValidationTest(IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(ValueError):
-            await tool(name="bad", cron_expression="not a cron")
+            await tool(
+                name="bad",
+                cron_expression="not a cron",
+                _agent_state=_agent_state(),
+            )
 
         self.assertEqual(storage.upserted, [])
 
     async def test_tool_invalid_timezone_does_not_persist(self) -> None:
         """The agent-facing tool rejects an unknown timezone before writing."""
-        storage = _Storage()
+        storage = _Storage(session=_creator_session())
         scheduler = _Scheduler()
         tool = ScheduleCreate(
             user_id="user-1",
@@ -285,13 +327,14 @@ class ScheduleValidationTest(IsolatedAsyncioTestCase):
                 name="bad timezone",
                 cron_expression="0 9 * * *",
                 timezone="Mars/Olympus_Mons",
+                _agent_state=_agent_state(),
             )
 
         self.assertEqual(storage.upserted, [])
 
     async def test_tool_invalid_time_window_does_not_persist(self) -> None:
         """The agent-facing tool rejects a reversed activation window."""
-        storage = _Storage()
+        storage = _Storage(session=_creator_session())
         scheduler = _Scheduler()
         tool = ScheduleCreate(
             user_id="user-1",
@@ -307,6 +350,26 @@ class ScheduleValidationTest(IsolatedAsyncioTestCase):
                 cron_expression="0 9 * * *",
                 started_at=datetime(2026, 1, 2),
                 ended_at=datetime(2026, 1, 1),
+                _agent_state=_agent_state(),
             )
 
+        self.assertEqual(storage.upserted, [])
+
+    async def test_tool_requires_creator_identity(self) -> None:
+        """Schedules cannot be created without a resolvable human peer."""
+        storage = _Storage(session=None)
+        scheduler = _Scheduler()
+        tool = ScheduleCreate(
+            user_id="user-1",
+            agent_id="agent-1",
+            chat_model_config=_request("0 9 * * *").chat_model_config,
+            storage=storage,
+            scheduler_manager=scheduler,
+        )
+        chunk = await tool(
+            name="no creator",
+            cron_expression="0 9 * * *",
+            _agent_state=_agent_state(),
+        )
+        self.assertEqual(chunk.state.value, "error")
         self.assertEqual(storage.upserted, [])

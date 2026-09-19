@@ -55,6 +55,18 @@ _WORKING_NOTICE = "已收到，正在处理…"
 _INBOX_NOTICE = "已收到，当前任务结束后会继续处理…"
 
 
+def _content_has_audio_blocks(content: list) -> bool:
+    """True when aggregated inbound content includes an audio DataBlock."""
+    for block in content or []:
+        if isinstance(block, DataBlock):
+            media = str(
+                getattr(getattr(block, "source", None), "media_type", "") or "",
+            )
+            if media.lower().startswith("audio/"):
+                return True
+    return False
+
+
 class ChannelGateway:
     """Route inbound channel events into runs; resume on card clicks."""
 
@@ -288,6 +300,10 @@ class ChannelGateway:
                 metadata={
                     "channel_user_id": event.channel_user_id or "",
                     "channel_user_name": event.channel_user_name or "",
+                    "inbound_has_audio": _content_has_audio_blocks(content),
+                    "chat_type": str(
+                        (event.metadata or {}).get("chat_type") or "",
+                    ),
                 },
             ),
         )
@@ -451,6 +467,20 @@ class ChannelGateway:
             from ..storage._model._session import SessionKnowledgeConfig
 
             knowledge_config = SessionKnowledgeConfig.model_validate(raw_kc)
+        from ..storage._model._session import TTSModelConfig
+
+        tts_cfg = None
+        raw_tts = getattr(record.session, "tts_model_config", None)
+        if isinstance(raw_tts, dict) and raw_tts.get("credential_id") and raw_tts.get("model"):
+            tts_cfg = TTSModelConfig(**raw_tts)
+        tts_rt_cfg = None
+        raw_tts_rt = getattr(record.session, "tts_realtime_model_config", None)
+        if (
+            isinstance(raw_tts_rt, dict)
+            and raw_tts_rt.get("credential_id")
+            and raw_tts_rt.get("model")
+        ):
+            tts_rt_cfg = TTSModelConfig(**raw_tts_rt)
         session_config = SessionConfig(
             workspace_id=await self._workspace_manager.assign_workspace_id(
                 user_id=record.user_id,
@@ -463,6 +493,8 @@ class ChannelGateway:
             fallback_chat_model_config=(
                 ChatModelConfig(**fallback) if fallback else None
             ),
+            tts_model_config=tts_cfg,
+            tts_realtime_model_config=tts_rt_cfg,
             knowledge_config=knowledge_config,
             name=self._session_name(record, event, scope),
         )

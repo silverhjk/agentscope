@@ -31,7 +31,8 @@ class ScheduleList(ToolBase):
     description: str = (
         "List all scheduled tasks for the current user. "
         "Shows schedule ID, name, cron expression, timezone, next run time, "
-        "enabled/disabled status, and whether the schedule is stateful."
+        "enabled/disabled status, creator, and whether the schedule is "
+        "stateful. Only the creator may delete/change a schedule."
     )
     input_schema: dict = _ScheduleListParams.model_json_schema()
 
@@ -99,6 +100,11 @@ class ScheduleList(ToolBase):
         for record in records:
             enabled_str = "enabled" if record.data.enabled else "disabled"
             next_run = next_run_map.get(record.id, "not in scheduler")
+            creator = (
+                record.data.creator_display_name
+                or record.data.creator_external_id
+                or "(unknown)"
+            )
             lines.append(
                 f"- [{enabled_str}] {record.data.name!r}  (ID: {record.id})\n"
                 f"  Cron:      {record.data.cron_expression}"
@@ -106,7 +112,9 @@ class ScheduleList(ToolBase):
                 f"  Next run:  {next_run}\n"
                 f"  Stateful:  {record.data.stateful}"
                 f"  |  Agent: {record.agent_id}\n"
-                f"  Source:    {record.data.source.value}\n",
+                f"  Source:    {record.data.source.value}\n"
+                f"  Creator:   {creator}"
+                f" ({record.data.creator_external_id or '-'})\n",
             )
 
         return ToolChunk(

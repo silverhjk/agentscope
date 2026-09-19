@@ -882,17 +882,38 @@ class ChatService:
                     )
 
                 # -------------------------------------------------------------
-                # 2b. TTS middleware — inject when the session has a TTS
-                # config.
+                # 2b. TTS middleware — channel + inbound modality (not LLM).
+                # IM voice inbound → non-realtime TTS (+ text already streamed).
+                # Xiaozhi → realtime TTS. Admin / text IM → skip.
                 # -------------------------------------------------------------
-                tts_cfg = session_record.config.tts_model_config
+                from ._reply_modality import ReplyTtsMode, resolve_reply_tts_mode
+
+                tts_mode = resolve_reply_tts_mode(
+                    source_channel_id=session_record.source_channel_id,
+                    input_msg=input_msg,
+                )
+                tts_cfg = None
+                if tts_mode == ReplyTtsMode.REALTIME:
+                    tts_cfg = session_record.config.tts_realtime_model_config
+                    if tts_cfg is None:
+                        tts_cfg = session_record.config.tts_model_config
+                elif tts_mode == ReplyTtsMode.NON_REALTIME:
+                    tts_cfg = session_record.config.tts_model_config
                 if tts_cfg is not None:
-                    tts_model = await get_tts_model(
-                        user_id,
-                        tts_cfg,
-                        self._access,
-                    )
-                    middlewares.append(TTSMiddleware(tts_model))
+                    try:
+                        tts_model = await get_tts_model(
+                            user_id,
+                            tts_cfg,
+                            self._access,
+                        )
+                        middlewares.append(TTSMiddleware(tts_model))
+                    except Exception:  # pylint: disable=broad-except
+                        logger.exception(
+                            "TTS attach failed for session %r (mode=%s); "
+                            "falling back to text-only reply",
+                            session_id,
+                            tts_mode.value,
+                        )
 
                 # -------------------------------------------------------------
                 # 2c. Knowledge-base middleware — inject when the session has
