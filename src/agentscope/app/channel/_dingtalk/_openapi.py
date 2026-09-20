@@ -22,8 +22,9 @@ _AUDIO_SUFFIXES = frozenset({"wav", "mp3", "amr", "ogg", "m4a", "aac"})
 
 
 def _estimate_audio_duration_seconds(data: bytes, media_type: str) -> int:
-    """Best-effort duration for DingTalk sampleAudio (seconds, ≥1)."""
+    """Best-effort duration for DingTalk sampleAudio (seconds, 1–59)."""
     media = (media_type or "").lower()
+    seconds = 0
     if "wav" in media or (len(data) > 44 and data[:4] == b"RIFF"):
         try:
             import io
@@ -33,11 +34,36 @@ def _estimate_audio_duration_seconds(data: bytes, media_type: str) -> int:
                 frames = wav.getnframes()
                 rate = wav.getframerate() or 16000
                 if rate > 0 and frames > 0:
-                    return max(1, int(round(frames / float(rate))))
+                    seconds = int(round(frames / float(rate)))
         except Exception:  # noqa: BLE001
-            pass
-    # Rough PCM/mp3 fallback (~16kHz mono 16-bit ≈ 32KB/s).
-    return max(1, int(round(len(data) / 32000.0)))
+            seconds = 0
+    if seconds <= 0:
+        # Fallback: 24kHz mono 16-bit PCM ≈ 48KB/s; 16kHz ≈ 32KB/s.
+        bytes_per_sec = 48000 if "24" in media or "wav" in media else 32000
+        seconds = int(round(len(data) / float(bytes_per_sec)))
+    # DingTalk requires a positive integer duration strictly less than 60.
+    return max(1, min(59, seconds))
+
+
+def _prepare_dingtalk_voice_bytes(
+    data: bytes,
+    media_type: str,
+) -> tuple[bytes, str, str]:
+    """Normalize outbound voice for DingTalk upload + sampleAudio.
+
+    Returns ``(bytes, media_type, file_suffix)``. Streaming TTS WAV headers
+    (``0xFFFFFFFF`` sizes) are rewritten into a finished WAV file.
+    """
+    media = (media_type or "").lower()
+    if "mpeg" in media or media.endswith("/mp3"):
+        return data, "audio/mpeg", "mp3"
+    if "amr" in media:
+        return data, "audio/amr", "amr"
+    from ...._utils._audio import finalize_wav_bytes
+
+    # WAV / streaming-WAV / bare PCM from TTS → finished WAV for DingTalk.
+    data = finalize_wav_bytes(data)
+    return data, "audio/wav", "wav"
 # An AI card's creation call carries no content: it opens the card in
 # a running state, and the update that follows tells it what to render.
 # "Done rendering" is about the card's own progress, not about whether
@@ -187,13 +213,13 @@ class _DingTalkOpenAPI:
         media_type: str,
     ) -> bool:
         """Upload voice media and send as a DingTalk audio message."""
-        suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "wav"
-        if "." not in file_name:
-            file_name = f"{file_name or 'reply'}.{suffix or 'wav'}"
+        data, media_type, suffix = _prepare_dingtalk_voice_bytes(data, media_type)
+        base = file_name.rsplit(".", 1)[0] if "." in file_name else (file_name or "reply")
+        file_name = f"{base}.{suffix}"
         media_id = await self._upload_media(
             data,
             file_name,
-            media_type or "audio/wav",
+            media_type,
             "voice",
         )
         if media_id is None:
@@ -201,7 +227,7 @@ class _DingTalkOpenAPI:
             media_id = await self._upload_media(
                 data,
                 file_name,
-                media_type or "audio/wav",
+                media_type,
                 "file",
             )
             if media_id is None:
@@ -212,7 +238,7 @@ class _DingTalkOpenAPI:
                 {
                     "mediaId": media_id,
                     "fileName": file_name,
-                    "fileType": suffix or "wav",
+                    "fileType": suffix,
                 },
             )
         duration = _estimate_audio_duration_seconds(data, media_type)
@@ -221,7 +247,7 @@ class _DingTalkOpenAPI:
             "sampleAudio",
             {
                 "mediaId": media_id,
-                "duration": str(max(1, duration)),
+                "duration": str(duration),
             },
         )
 

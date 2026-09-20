@@ -905,6 +905,9 @@ class ChatService:
                             user_id,
                             tts_cfg,
                             self._access,
+                            # Non-realtime IM needs a finished WAV file;
+                            # streaming 0xFFFFFFFF headers break DingTalk play.
+                            stream=(tts_mode == ReplyTtsMode.REALTIME),
                         )
                         middlewares.append(TTSMiddleware(tts_model))
                     except Exception:  # pylint: disable=broad-except
