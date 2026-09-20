@@ -954,6 +954,7 @@ class DingTalkChannel(ChannelBase):
         if not content or self._emit is None:
             return
 
+        message_type = str(payload.get("msgtype") or "")
         await self._emit(
             ChannelEvent(
                 channel_id=self._channel_id,
@@ -966,6 +967,8 @@ class DingTalkChannel(ChannelBase):
                 metadata={
                     "chat_type": "group" if is_group else "private",
                     "conversation_type": conversation_type,
+                    # ASR-only audio turns still count as voice for TTS reply.
+                    "inbound_has_audio": message_type == "audio",
                 },
             ),
         )
@@ -1000,6 +1003,11 @@ class DingTalkChannel(ChannelBase):
         recognition = str(raw_content.get("recognition") or "").strip()
         if recognition:
             blocks.append(TextBlock(text=recognition))
+        # When DingTalk already ASR'd the voice, keep text only. Raw
+        # ``audio/ogg`` breaks OpenAI-formatter models (WAV/MP3 only) and
+        # bloats context; TTS modality uses event metadata instead.
+        if message_type == "audio" and recognition:
+            return blocks
         download_code = str(raw_content.get("downloadCode") or "")
         if not download_code:
             return blocks

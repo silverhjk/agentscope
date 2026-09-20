@@ -300,7 +300,10 @@ class ChannelGateway:
                 metadata={
                     "channel_user_id": event.channel_user_id or "",
                     "channel_user_name": event.channel_user_name or "",
-                    "inbound_has_audio": _content_has_audio_blocks(content),
+                    "inbound_has_audio": _content_has_audio_blocks(content)
+                    or bool(
+                        (event.metadata or {}).get("inbound_has_audio"),
+                    ),
                     "chat_type": str(
                         (event.metadata or {}).get("chat_type") or "",
                     ),

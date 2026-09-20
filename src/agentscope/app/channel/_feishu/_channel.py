@@ -419,6 +419,7 @@ class FeishuChannel(ChannelBase):
             return None
 
         msg_type = message.message_type
+        meta["inbound_has_audio"] = msg_type == "audio"
         content: list[TextBlock | DataBlock] = []
         if msg_type in _MEDIA_TYPES:
             block = await self._download_media(message, msg_type)

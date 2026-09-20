@@ -663,9 +663,10 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
         self.assertEqual(block.name, "result.pdf")
         self.assertEqual(block.source.media_type, "application/pdf")
 
-    async def test_audio_callback_keeps_recognition_before_media(self) -> None:
-        channel, _ = _channel_with_openapi(
-            _FakeMediaOpenAPI((b"audio", "audio/mpeg")),
+    async def test_audio_callback_keeps_recognition_without_media(self) -> None:
+        """ASR text is enough; raw OGG/MP3 must not enter model history."""
+        channel, api = _channel_with_openapi(
+            _FakeMediaOpenAPI((b"audio", "audio/ogg")),
         )
         received = await _message_callbacks(
             channel,
@@ -678,10 +679,11 @@ class DingTalkChannelTest(  # pylint: disable=too-many-public-methods
             ),
         )
 
+        self.assertEqual(len(received[0].content), 1)
         self.assertIsInstance(received[0].content[0], TextBlock)
         self.assertEqual(received[0].message, "transcribed speech")
-        audio = cast(DataBlock, received[0].content[1])
-        self.assertEqual(audio.source.media_type, "audio/mpeg")
+        self.assertTrue(received[0].metadata.get("inbound_has_audio"))
+        self.assertEqual(api.download_calls, [])
 
     async def test_rich_text_preserves_text_image_order(self) -> None:
         channel, _ = _channel_with_openapi()
