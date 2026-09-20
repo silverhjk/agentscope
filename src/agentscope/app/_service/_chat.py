@@ -884,7 +884,7 @@ class ChatService:
                 # -------------------------------------------------------------
                 # 2b. TTS middleware — channel + inbound modality (not LLM).
                 # IM voice inbound → non-realtime TTS (+ text already streamed).
-                # Xiaozhi → realtime TTS. Admin / text IM → skip.
+                # Xiaozhi → none (edge TTS). Admin / text IM → skip.
                 # -------------------------------------------------------------
                 from ._reply_modality import ReplyTtsMode, resolve_reply_tts_mode
 

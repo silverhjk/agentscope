@@ -66,13 +66,14 @@ def resolve_reply_tts_mode(
 ) -> ReplyTtsMode:
     """Channel + inbound modality → TTS mode (never LLM-chosen).
 
-    - Xiaozhi device → always realtime TTS
+    - Xiaozhi device → no Runtime TTS. The edge synthesizes from
+      speakable text deltas so the LLM stream is not blocked on speech.
     - IM (``im-*`` / channel sessions): audio inbound → non-realtime; text → none
     - Admin / console / other → none
     """
     channel = (source_channel_id or "").strip().lower()
     if channel == "xiaozhi" or channel.startswith("xiaozhi"):
-        return ReplyTtsMode.REALTIME
+        return ReplyTtsMode.NONE
     if channel.startswith("im-") or channel in {"dingtalk", "feishu"}:
         if inbound_has_audio(input_msg):
             return ReplyTtsMode.NON_REALTIME

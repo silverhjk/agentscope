@@ -55,6 +55,7 @@ async def get_model(
         credential=credential,
         model=config.model,
         parameters=parameters,
+        stream=True,
     )
 
     # Override the formatter's input types with the built-in model card's

@@ -705,7 +705,14 @@ class DingTalkChannel(ChannelBase):
                             f"{connection['endpoint']}?ticket="
                             f"{quote_plus(connection['ticket'])}"
                         )
-                        async with websockets.connect(uri) as websocket:
+                        # Clash/macOS system SOCKS is advertised as
+                        # {"socks": "http://127.0.0.1:7897"}; websockets then
+                        # rewrites it to socks5h:// and requires python-socks.
+                        # DingTalk Stream should go direct.
+                        async with websockets.connect(
+                            uri,
+                            proxy=None,
+                        ) as websocket:
                             self.websocket = websocket
                             self._keepalive_task = asyncio.create_task(
                                 self.keepalive(websocket),
