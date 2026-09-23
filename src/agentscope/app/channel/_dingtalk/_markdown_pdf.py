@@ -1,24 +1,14 @@
 # -*- coding: utf-8 -*-
 """Convert Markdown to PDF for DingTalk + admin downloads.
 
-Preferred order (Chrome first for real Markdown fidelity):
+Only two engines, in this order:
 
-1. Env ``MD_TO_PDF_CMD`` (``{input}`` / ``{output}``)
-2. ``md-to-pdf`` / ``npx --yes md-to-pdf`` (headless Chrome / Puppeteer)
+1. ``md-to-pdf`` / ``npx --yes md-to-pdf`` (headless Chrome / Puppeteer)
    — skipped when no Chrome unless ``MD_TO_PDF_ALLOW_PUPPETEER_DOWNLOAD=1``
-3. ``pandoc``
-4. ``mdpdf`` (PyMuPDF CLI, requires ``-o``)
-5. ``agentscope-md2pdf`` (reportlab) — last-resort fallback
+2. ``pandoc`` (uses ``--pdf-engine`` when weasyprint / wkhtmltopdf / xelatex
+   is on PATH)
 
-Force reportlab-first (legacy)::
-
-    MD_TO_PDF_PREFER_BUILTIN=1
-
-Skip reportlab entirely::
-
-    MD_TO_PDF_SKIP_BUILTIN=1
-
-Production tip: install ``chromium`` in the runtime image and set::
+Production: install Chromium + CJK fonts, then set::
 
     MD_TO_PDF_CHROME=/usr/bin/chromium
 """
@@ -30,7 +20,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from glob import glob as _glob_paths
 from pathlib import Path
@@ -199,17 +188,6 @@ def _env_flag(name: str) -> bool:
     }
 
 
-def _try_reportlab_inprocess(data: bytes, file_name: str) -> bytes | None:
-    """Bundled reportlab converter (last-resort fallback)."""
-    try:
-        from .md2pdf import convert_bytes
-
-        return convert_bytes(data, file_name)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("in-process agentscope-md2pdf unavailable: %s", exc)
-        return None
-
-
 def _chrome_md_to_pdf_cmd(
     md_path: Path,
     *,
@@ -273,100 +251,56 @@ def _chrome_md_to_pdf_cmd(
     return None
 
 
+_PANDOC_ENGINES = (
+    "weasyprint",
+    "wkhtmltopdf",
+    "xelatex",
+    "lualatex",
+    "pdflatex",
+)
+
+
+def _pandoc_cmd(md_path: Path, pdf_path: Path) -> list[str] | None:
+    """Build ``pandoc`` argv; attach a PDF engine when one is on PATH."""
+    if not shutil.which("pandoc"):
+        return None
+    cmd = ["pandoc", str(md_path), "-o", str(pdf_path)]
+    for engine in _PANDOC_ENGINES:
+        if shutil.which(engine):
+            cmd.extend(["--pdf-engine", engine])
+            break
+    return cmd
+
+
 def _candidate_commands(
     md_path: Path,
     pdf_path: Path,
     *,
     stylesheet: Path | None,
-    prefer_builtin: bool,
     document_title: str | None = None,
 ) -> list[list[str]]:
-    """Build ordered converter command lines."""
+    """Chrome first, then pandoc."""
     cmds: list[list[str]] = []
-    custom = (os.environ.get("MD_TO_PDF_CMD") or "").strip()
-    if custom:
-        rendered = custom.format(input=str(md_path), output=str(pdf_path))
-        cmds.append(["/bin/sh", "-c", rendered])
-
     chrome = _chrome_md_to_pdf_cmd(
         md_path,
         stylesheet=stylesheet,
         document_title=document_title,
     )
-    reportlab_cmds: list[list[str]] = []
-    if shutil.which("agentscope-md2pdf"):
-        reportlab_cmds.append(
-            ["agentscope-md2pdf", str(md_path), "-o", str(pdf_path)],
-        )
-    reportlab_cmds.append(
-        [
-            sys.executable,
-            "-m",
-            "agentscope.app.channel._dingtalk.md2pdf",
-            str(md_path),
-            "-o",
-            str(pdf_path),
-        ],
-    )
-
-    # mdpdf (PyMuPDF) — requires --output; better structure than bare reportlab
-    # but limited CJK fonts. Prefer after Chrome/pandoc.
-    mdpdf_cmds: list[list[str]] = []
-    if shutil.which("mdpdf"):
-        mdpdf_cmds.append(
-            ["mdpdf", "-o", str(pdf_path), "-p", "A4", str(md_path)],
-        )
-    if shutil.which("uvx"):
-        mdpdf_cmds.append(
-            [
-                "uvx",
-                "--from",
-                "mdpdf",
-                "mdpdf",
-                "-o",
-                str(pdf_path),
-                "-p",
-                "A4",
-                str(md_path),
-            ],
-        )
-
-    if prefer_builtin:
-        cmds.extend(reportlab_cmds)
-        if chrome:
-            cmds.append(chrome)
-    else:
-        if chrome:
-            cmds.append(chrome)
-        if shutil.which("pandoc"):
-            cmds.append(["pandoc", str(md_path), "-o", str(pdf_path)])
-        cmds.extend(mdpdf_cmds)
-        # reportlab runs in-process as last resort in convert_markdown_to_pdf
-
-    if prefer_builtin and shutil.which("pandoc"):
-        cmds.append(["pandoc", str(md_path), "-o", str(pdf_path)])
-    if prefer_builtin:
-        cmds.extend(mdpdf_cmds)
-
+    if chrome:
+        cmds.append(chrome)
+    pandoc = _pandoc_cmd(md_path, pdf_path)
+    if pandoc:
+        cmds.append(pandoc)
     return cmds
 
 
 def convert_markdown_to_pdf(data: bytes, file_name: str = "document.md") -> bytes:
-    """Convert UTF-8 Markdown bytes to PDF.
-
-    Default: headless Chrome via ``md-to-pdf``, then pandoc, then reportlab.
+    """Convert UTF-8 Markdown bytes to PDF (Chrome, then pandoc).
 
     Raises:
         RuntimeError: When no converter is available or all attempts fail.
     """
-    prefer_builtin = _env_flag("MD_TO_PDF_PREFER_BUILTIN")
-    skip_builtin = _env_flag("MD_TO_PDF_SKIP_BUILTIN")
     timeout = int(os.environ.get("MD_TO_PDF_TIMEOUT_SEC") or _DEFAULT_TIMEOUT_SEC)
-
-    if prefer_builtin and not skip_builtin:
-        built = _try_reportlab_inprocess(data, file_name)
-        if built:
-            return built
 
     with tempfile.TemporaryDirectory(prefix="md2pdf-") as tmp:
         tmp_path = Path(tmp)
@@ -385,7 +319,6 @@ def convert_markdown_to_pdf(data: bytes, file_name: str = "document.md") -> byte
             md_path,
             pdf_path,
             stylesheet=stylesheet,
-            prefer_builtin=prefer_builtin,
             document_title=doc_title,
         )
         errors: list[str] = []
@@ -393,11 +326,16 @@ def convert_markdown_to_pdf(data: bytes, file_name: str = "document.md") -> byte
         run_env = dict(os.environ)
         if chrome_bin:
             run_env.setdefault("PUPPETEER_EXECUTABLE_PATH", chrome_bin)
-        # Avoid broken/root-owned ~/.npm cache (common EACCES with npx).
         npm_cache = tmp_path / "npm-cache"
         npm_cache.mkdir(exist_ok=True)
         run_env["npm_config_cache"] = str(npm_cache)
         run_env["NPM_CONFIG_CACHE"] = str(npm_cache)
+        if not commands:
+            raise RuntimeError(
+                "Markdown→PDF failed: no converter. Install Chromium and "
+                "Node (`md-to-pdf` or npx), or install pandoc "
+                "(plus weasyprint / wkhtmltopdf / xelatex).",
+            )
         for cmd in commands:
             try:
                 logger.info("Markdown→PDF via %s", " ".join(cmd[:6]))
@@ -414,7 +352,6 @@ def convert_markdown_to_pdf(data: bytes, file_name: str = "document.md") -> byte
                         "utf-8",
                         errors="replace",
                     )
-                    # Prefer the tail — npm warnings often precede the real error.
                     err_tail = err.strip()[-800:] if err.strip() else f"exit {proc.returncode}"
                     logger.warning(
                         "Markdown→PDF command failed (%s): %s",
@@ -434,19 +371,9 @@ def convert_markdown_to_pdf(data: bytes, file_name: str = "document.md") -> byte
             except OSError as exc:
                 errors.append(f"{cmd[0]}: {exc}")
 
-        if not skip_builtin and not prefer_builtin:
-            built = _try_reportlab_inprocess(data, file_name)
-            if built:
-                logger.warning(
-                    "Markdown→PDF fell back to reportlab after Chrome/CLI "
-                    "failures: %s",
-                    " | ".join(errors[:3]) if errors else "no CLI",
-                )
-                return built
-
         raise RuntimeError(
-            "Markdown→PDF failed. Install Node and run "
-            "`npx --yes md-to-pdf`, or set MD_TO_PDF_CMD / install pandoc. "
+            "Markdown→PDF failed. Need Chromium + `md-to-pdf`/`npx`, "
+            "or pandoc. "
             + (" | ".join(errors) if errors else ""),
         )
 
