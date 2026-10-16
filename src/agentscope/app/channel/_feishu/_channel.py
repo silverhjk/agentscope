@@ -22,7 +22,11 @@ from typing import Any, AsyncIterator, Awaitable, Callable, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from ...._logging import logger
-from ....event import ReplyEndEvent, RequireUserConfirmEvent
+from ....event import (
+    ReplyEndEvent,
+    RequireExternalExecutionEvent,
+    RequireUserConfirmEvent,
+)
 from ....message import Base64Source, DataBlock, Msg, TextBlock
 from .._base import (
     ChannelBase,
@@ -37,8 +41,18 @@ from ._credential_binding import FeishuCredentialBinding
 from ._card_templates import (
     _build_action_response,
     _build_approval_card,
+    _build_ask_user_action_response,
+    _build_ask_user_choice_card,
+    _build_ask_user_file_card,
+    _build_ask_user_form_card,
     _build_toast,
     _parse_action,
+    _parse_ask_user_action,
+)
+from ..._ask_user import (
+    ASK_USER_TOOL_NAME,
+    prompt_fallback_text,
+    spec_from_tool_call,
 )
 
 if TYPE_CHECKING:
@@ -625,11 +639,34 @@ class FeishuChannel(ChannelBase):
         Returns:
             `P2CardActionTriggerResponse`: The synchronous toast ack.
         """
-        action = getattr(getattr(data.event, "action", None), "value", None)
-        parsed = _parse_action(action)
-        if parsed is None:
+        action_obj = getattr(data.event, "action", None)
+        value = getattr(action_obj, "value", None)
+        form_value = getattr(action_obj, "form_value", None)
+        parsed = _parse_action(value)
+        if parsed is not None:
+            tool_call_id, chat_id, approved, agent_id, session_id = parsed
+            operator = getattr(data.event, "operator", None)
+            user_id = getattr(operator, "open_id", "") or ""
+            if self._emit:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit(
+                        ChannelConfirmationResultEvent(
+                            channel_id=self._channel_id,
+                            chat_id=chat_id,
+                            channel_user_id=user_id,
+                            agent_id=agent_id,
+                            session_id=session_id,
+                            tool_call_id=tool_call_id,
+                            approved=approved,
+                        ),
+                    ),
+                    loop,
+                )
+            return _build_action_response(approved)
+        asked = _parse_ask_user_action(value, form_value)
+        if asked is None:
             return _build_toast(False)
-        tool_call_id, chat_id, approved, agent_id, session_id = parsed
+        tool_call_id, chat_id, agent_id, session_id, payload = asked
         operator = getattr(data.event, "operator", None)
         user_id = getattr(operator, "open_id", "") or ""
         if self._emit:
@@ -642,14 +679,13 @@ class FeishuChannel(ChannelBase):
                         agent_id=agent_id,
                         session_id=session_id,
                         tool_call_id=tool_call_id,
-                        approved=approved,
+                        approved=not bool(payload.get("cancelled")),
+                        payload=payload,
                     ),
                 ),
                 loop,
             )
-        # Update the clicked card in place via the callback response —
-        # reliable even while the approved run floods the card API.
-        return _build_action_response(approved)
+        return _build_ask_user_action_response(bool(payload.get("cancelled")))
 
     # -- Outbound (gateway → platform) --
 
@@ -687,6 +723,7 @@ class FeishuChannel(ChannelBase):
         """
         reply: Msg | None = None
         confirm: RequireUserConfirmEvent | None = None
+        external: RequireExternalExecutionEvent | None = None
         ref: str | None = None
         failed = False
         last = 0.0
@@ -701,6 +738,9 @@ class FeishuChannel(ChannelBase):
             evt = _EVENT_ADAPTER.validate_python(raw)
             if isinstance(evt, RequireUserConfirmEvent):
                 confirm = evt
+                break
+            if isinstance(evt, RequireExternalExecutionEvent):
+                external = evt
                 break
             reply_id = getattr(evt, "reply_id", None)
             if reply_id is not None:
@@ -760,6 +800,8 @@ class FeishuChannel(ChannelBase):
                     )
         if confirm is not None:
             await self._present_confirm(event, confirm)
+        if external is not None:
+            await self._present_ask_user(event, external)
 
     async def _finish_card(
         self,
@@ -896,6 +938,82 @@ class FeishuChannel(ChannelBase):
                     event.metadata.get("session_id", ""),
                 ),
             )
+
+    async def _present_ask_user(
+        self,
+        event: ChannelEvent,
+        req: RequireExternalExecutionEvent,
+    ) -> None:
+        """Post an interactive card (or text fallback) for each ask_user."""
+        agent_id = str(event.metadata.get("agent_id", "") or "")
+        session_id = str(event.metadata.get("session_id", "") or "")
+        for tool in req.tool_calls:
+            spec = spec_from_tool_call(tool)
+            if spec is None or tool.name != ASK_USER_TOOL_NAME:
+                await self._send(
+                    event.channel_message_id,
+                    event.chat_id,
+                    "text",
+                    json.dumps(
+                        {"text": f"等待外部执行：{tool.name}"},
+                        ensure_ascii=False,
+                    ),
+                )
+                continue
+            if spec.kind == "choice":
+                card = _build_ask_user_choice_card(
+                    tool.id,
+                    event.chat_id,
+                    spec.prompt,
+                    [{"id": o.id, "label": o.label} for o in spec.options],
+                    agent_id,
+                    session_id,
+                )
+            elif spec.kind == "form":
+                card = _build_ask_user_form_card(
+                    tool.id,
+                    event.chat_id,
+                    spec.prompt,
+                    [
+                        {
+                            "name": f.name,
+                            "label": f.label,
+                            "type": f.type,
+                            "options": [
+                                {"id": o.id, "label": o.label}
+                                for o in f.options
+                            ],
+                        }
+                        for f in spec.fields
+                    ],
+                    agent_id,
+                    session_id,
+                )
+            else:
+                card = _build_ask_user_file_card(
+                    tool.id,
+                    event.chat_id,
+                    spec.prompt,
+                    spec.accept,
+                    agent_id,
+                    session_id,
+                )
+            sent = await self._send(
+                event.channel_message_id,
+                event.chat_id,
+                "interactive",
+                card,
+            )
+            if not sent:
+                await self._send(
+                    event.channel_message_id,
+                    event.chat_id,
+                    "text",
+                    json.dumps(
+                        {"text": prompt_fallback_text(spec)},
+                        ensure_ascii=False,
+                    ),
+                )
 
     async def send_reaction(
         self,

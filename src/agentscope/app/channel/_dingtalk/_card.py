@@ -272,3 +272,119 @@ def _field(mapping: dict[str, Any], *names: str) -> str:
         if value:
             return value
     return ""
+
+
+# -- ask_user choice cards -----------------------------------------------
+
+_ASK_CANCEL_ACTION = "ask_cancel"
+_ASK_OPTION_PREFIX = "opt"
+
+
+@dataclass(frozen=True, slots=True)
+class _AskUserDecision:
+    """A validated ask_user click from a DingTalk card callback."""
+
+    out_track_id: str
+    user_id: str
+    tool_call_id: str
+    chat_id: str
+    agent_id: str
+    session_id: str
+    cancelled: bool
+    option_index: int | None = None
+
+
+def _ask_user_choice_card_data(
+    prompt: str,
+    options: list[tuple[str, str]],
+) -> dict[str, str]:
+    """Build a general AI-card parameter map with one button per option."""
+    shown = prompt.encode("utf-8")[:_PARAM_VALUE_BUDGET].decode(
+        "utf-8",
+        "ignore",
+    )
+    buttons: list[dict[str, Any]] = []
+    for i, (_oid, label) in enumerate(options[:8]):
+        buttons.append(
+            {
+                "text": (label or f"选项{i + 1}")[:20],
+                "color": "blue",
+                "id": f"{_ASK_OPTION_PREFIX}{i}",
+                "request": True,
+            },
+        )
+    buttons.append(
+        {
+            "text": "取消",
+            "color": "gray",
+            "id": _ASK_CANCEL_ACTION,
+            "request": True,
+        },
+    )
+    layout = json.dumps(
+        {
+            "order": ["msgTitle", "staticMsgContent", "msgButtons"],
+            "msgButtons": buttons,
+        },
+        ensure_ascii=False,
+    )
+    return {
+        "msgTitle": "请选择",
+        "staticMsgContent": shown,
+        "sys_full_json_obj": layout,
+        "status": "pending",
+    }
+
+
+def _ask_user_resolved_card_data(cancelled: bool) -> dict[str, str]:
+    """Settle an ask_user card after a click."""
+    return {
+        "msgTitle": "请选择",
+        "staticMsgContent": "已取消。" if cancelled else "已收到你的选择。",
+        "sys_full_json_obj": _SETTLED_LAYOUT,
+        "flowStatus": "3",
+        "status": "cancelled" if cancelled else "answered",
+    }
+
+
+def _parse_ask_user_callback(payload: Any) -> _AskUserDecision | None:
+    """Parse an ask_user choice/cancel click from a DingTalk callback."""
+    if not isinstance(payload, dict):
+        return None
+    content = _json_object(payload.get("content"))
+    private_data = _json_object(content.get("cardPrivateData"))
+    params = _json_object(private_data.get("params"))
+    action = str(
+        params.get("action") or params.get("id") or "",
+    ).strip().lower()
+    cancelled = action in {_ASK_CANCEL_ACTION, "cancel"}
+    option_index: int | None = None
+    if action.startswith(_ASK_OPTION_PREFIX) and action[len(_ASK_OPTION_PREFIX) :].isdigit():
+        option_index = int(action[len(_ASK_OPTION_PREFIX) :])
+    elif not cancelled:
+        return None
+    user_id = _field(payload, "userId", "user_id")
+    out_track_id = _field(payload, "outTrackId", "out_track_id")
+    if not all((user_id, out_track_id)):
+        return None
+    tool_call_id = _field(
+        params,
+        "toolCallId",
+        "tool_call_id",
+    ) or _tool_call_id(out_track_id)
+    chat_id = _field(params, "chatId", "chat_id") or _chat_from_space(
+        payload,
+        user_id,
+    )
+    if not tool_call_id or not chat_id:
+        return None
+    return _AskUserDecision(
+        out_track_id=out_track_id,
+        user_id=user_id,
+        tool_call_id=tool_call_id,
+        chat_id=chat_id,
+        agent_id=_field(params, "agentId", "agent_id"),
+        session_id=_field(params, "sessionId", "session_id"),
+        cancelled=cancelled,
+        option_index=option_index,
+    )

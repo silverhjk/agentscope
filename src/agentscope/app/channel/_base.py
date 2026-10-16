@@ -131,6 +131,11 @@ class ChannelConfirmationResultEvent(BaseModel):
     actor: str = ""
     """Platform-side id of whoever made the decision (for audit)."""
 
+    payload: dict[str, Any] | None = None
+    """When set, this click answers a parked *external* tool (``ask_user``)
+    rather than a permission ASK. The gateway resumes with
+    ``ExternalExecutionResultEvent``. Empty on tool-approval cards."""
+
 
 class ChannelStatus(BaseModel):
     """Live connection status of a running channel adapter — owned and

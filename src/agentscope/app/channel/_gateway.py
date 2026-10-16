@@ -34,7 +34,7 @@ from ..storage import (
 )
 from ..workspace_manager import WorkspaceManagerBase
 from ._base import ChannelBase, ChannelEvent, ChannelConfirmationResultEvent
-from ._decision import resume_after_decision
+from ._decision import resume_after_decision, resume_after_external
 from ._routing import make_session_id, resolve, resolve_binding
 from ._session_commands import (
     HELP_TEXT,
@@ -196,6 +196,16 @@ class ChannelGateway:
             `bool`: Whether the run was resumed.
         """
         agent_id, session_id = target
+        if event.payload is not None:
+            return await resume_after_external(
+                self._bus,
+                self._storage,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                tool_call_id=event.tool_call_id,
+                payload=event.payload,
+            )
         return await resume_after_decision(
             self._bus,
             self._storage,

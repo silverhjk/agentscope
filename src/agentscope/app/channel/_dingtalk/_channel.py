@@ -18,7 +18,11 @@ from urllib.parse import quote_plus
 from pydantic import BaseModel, Field
 
 from ...._logging import logger
-from ....event import ReplyEndEvent, RequireUserConfirmEvent
+from ....event import (
+    ReplyEndEvent,
+    RequireExternalExecutionEvent,
+    RequireUserConfirmEvent,
+)
 from ....message import (
     Base64Source,
     DataBlock,
@@ -39,9 +43,17 @@ from .._base import (
 )
 from ._card import (
     _approval_card_data,
+    _ask_user_choice_card_data,
+    _ask_user_resolved_card_data,
+    _parse_ask_user_callback,
     _parse_card_callback,
     _resolved_card_data,
     _tracking_id,
+)
+from ..._ask_user import (
+    ASK_USER_TOOL_NAME,
+    prompt_fallback_text,
+    spec_from_tool_call,
 )
 from ._openapi import _DingTalkOpenAPI
 
@@ -324,6 +336,7 @@ class DingTalkChannel(ChannelBase):
         """
         reply: Msg | None = None
         confirm: RequireUserConfirmEvent | None = None
+        external: RequireExternalExecutionEvent | None = None
         stream_ref: str | None = None
         stream_failed = False
         last_stream_update = 0.0
@@ -344,6 +357,9 @@ class DingTalkChannel(ChannelBase):
             agent_event = _EVENT_ADAPTER.validate_python(raw)
             if isinstance(agent_event, RequireUserConfirmEvent):
                 confirm = agent_event
+                break
+            if isinstance(agent_event, RequireExternalExecutionEvent):
+                external = agent_event
                 break
             reply_id = getattr(agent_event, "reply_id", None)
             if reply_id is not None:
@@ -417,6 +433,8 @@ class DingTalkChannel(ChannelBase):
                 confirm,
                 reply.name if reply else "",
             )
+        if external is not None:
+            await self._present_ask_user(event, external)
 
     def _has_streaming_text(self, reply: Msg) -> bool:
         """Whether the partial reply contains text enabled for display."""
@@ -889,12 +907,80 @@ class DingTalkChannel(ChannelBase):
                     "工具审批卡片投放失败，请管理员检查卡片模板与应用权限。",
                 )
 
+    async def _present_ask_user(
+        self,
+        event: ChannelEvent,
+        request: RequireExternalExecutionEvent,
+    ) -> None:
+        """Present choice cards or a text prompt for parked ask_user calls."""
+        template_id = self._config.approval_card_template_id
+        approver_id = (
+            event.chat_id.removeprefix("user:")
+            if event.chat_id.startswith("user:")
+            else ""
+        )
+        for tool in request.tool_calls:
+            spec = spec_from_tool_call(tool)
+            if spec is None or tool.name != ASK_USER_TOOL_NAME:
+                await self._api().send_text(
+                    event.chat_id,
+                    f"等待外部执行：{tool.name}",
+                )
+                continue
+            if spec.kind == "choice" and template_id:
+                card_data = _ask_user_choice_card_data(
+                    spec.prompt,
+                    [(o.id, o.label) for o in spec.options],
+                )
+                out_track_id = await self._api().create_approval_card(
+                    event.chat_id,
+                    approver_id,
+                    template_id,
+                    card_data,
+                    _tracking_id(tool.id),
+                )
+                if out_track_id is not None:
+                    continue
+            await self._api().send_text(
+                event.chat_id,
+                prompt_fallback_text(spec),
+            )
+
     async def _on_card_callback(self, payload: dict[str, Any]) -> None:
         """Validate a card decision and emit the gateway resume event.
 
         Args:
             payload (`dict[str, Any]`): Stream advanced-card callback data.
         """
+        asked = _parse_ask_user_callback(payload)
+        if asked is not None:
+            if self._emit is not None:
+                payload_body: dict[str, Any] = (
+                    {"cancelled": True}
+                    if asked.cancelled
+                    else {
+                        "kind": "choice",
+                        "option_index": asked.option_index,
+                    }
+                )
+                await self._emit(
+                    ChannelConfirmationResultEvent(
+                        channel_id=self._channel_id,
+                        chat_id=asked.chat_id,
+                        channel_user_id=asked.user_id,
+                        agent_id=asked.agent_id,
+                        session_id=asked.session_id,
+                        tool_call_id=asked.tool_call_id,
+                        approved=not asked.cancelled,
+                        actor=asked.user_id,
+                        payload=payload_body,
+                    ),
+                )
+            await self._api().update_approval_card(
+                asked.out_track_id,
+                _ask_user_resolved_card_data(asked.cancelled),
+            )
+            return
         decision = _parse_card_callback(payload)
         if decision is None:
             # The payload carries the clicker, the conversation and

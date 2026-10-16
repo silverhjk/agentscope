@@ -19,7 +19,12 @@ from typing import AsyncIterator, Awaitable, Callable, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from ...._logging import logger
-from ....event import ReplyEndEvent, RequireUserConfirmEvent
+from ....event import (
+    ReplyEndEvent,
+    RequireExternalExecutionEvent,
+    RequireUserConfirmEvent,
+)
+from ..._ask_user import prompt_fallback_text, spec_from_tool_call
 from ....message import Base64Source, DataBlock, Msg, TextBlock
 from .._base import (
     ChannelBase,
@@ -322,10 +327,14 @@ class DiscordChannel(ChannelBase):
             return
         reply: Msg | None = None
         confirm: RequireUserConfirmEvent | None = None
+        external: RequireExternalExecutionEvent | None = None
         async for raw in events:
             evt = _EVENT_ADAPTER.validate_python(raw)
             if isinstance(evt, RequireUserConfirmEvent):
                 confirm = evt
+                break
+            if isinstance(evt, RequireExternalExecutionEvent):
+                external = evt
                 break
             reply_id = getattr(evt, "reply_id", None)
             if reply_id is not None:
@@ -353,6 +362,17 @@ class DiscordChannel(ChannelBase):
                 )
         if confirm is not None:
             await self._present_confirm(event, confirm)
+        if external is not None:
+            for tool in external.tool_calls:
+                spec = spec_from_tool_call(tool)
+                text = (
+                    prompt_fallback_text(spec)
+                    if spec is not None
+                    else f"等待外部执行：{tool.name}"
+                )
+                for part in self._split_long_message(text):
+                    if part:
+                        await channel.send(part)
 
     async def _present_confirm(
         self,

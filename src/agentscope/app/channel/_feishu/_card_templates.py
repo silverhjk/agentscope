@@ -211,3 +211,332 @@ def _wrap_response(body: dict) -> Any:
         return P2CardActionTriggerResponse(body)
     except (ImportError, AttributeError):
         return body
+
+
+# -- ask_user interactive cards ------------------------------------------
+
+_ASK_USER_TYPE = "ask_user"
+_ASK_CHOICE = "choice"
+_ASK_FORM = "form"
+_ASK_CANCEL = "cancel"
+
+
+def _ask_user_base(
+    tool_call_id: str,
+    chat_id: str,
+    agent_id: str,
+    session_id: str,
+) -> dict[str, str]:
+    return {
+        "type": _ASK_USER_TYPE,
+        "tool_call_id": tool_call_id,
+        "chat_id": chat_id,
+        "agent_id": agent_id,
+        "session_id": session_id,
+    }
+
+
+def _build_ask_user_choice_card(
+    tool_call_id: str,
+    chat_id: str,
+    prompt: str,
+    options: list[dict[str, str]],
+    agent_id: str = "",
+    session_id: str = "",
+) -> str:
+    """Build a Feishu card with one button per choice option."""
+    base = _ask_user_base(tool_call_id, chat_id, agent_id, session_id)
+    shown = prompt if len(prompt) <= 800 else prompt[:799] + "…"
+    actions: list[dict[str, Any]] = []
+    for i, opt in enumerate(options[:8]):
+        label = str(opt.get("label") or opt.get("id") or f"选项{i + 1}")
+        oid = str(opt.get("id") or "")
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label[:40]},
+                "type": "primary" if i == 0 else "default",
+                "value": {
+                    **base,
+                    "action": _ASK_CHOICE,
+                    "option_id": oid,
+                    "option_index": str(i),
+                },
+            },
+        )
+    actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "取消"},
+            "type": "danger",
+            "value": {**base, "action": _ASK_CANCEL},
+        },
+    )
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "请选择"},
+        },
+        "elements": [
+            {"tag": "markdown", "content": shown},
+            {"tag": "hr"},
+            {"tag": "action", "actions": actions},
+        ],
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _build_ask_user_form_card(
+    tool_call_id: str,
+    chat_id: str,
+    prompt: str,
+    fields: list[dict[str, Any]],
+    agent_id: str = "",
+    session_id: str = "",
+) -> str:
+    """Build a Feishu card with short form inputs + submit."""
+    base = _ask_user_base(tool_call_id, chat_id, agent_id, session_id)
+    shown = prompt if len(prompt) <= 800 else prompt[:799] + "…"
+    elements: list[dict[str, Any]] = [
+        {"tag": "markdown", "content": shown},
+        {"tag": "hr"},
+    ]
+    for field in fields[:6]:
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        label = str(field.get("label") or name)
+        ftype = str(field.get("type") or "text")
+        options = field.get("options") if isinstance(field.get("options"), list) else []
+        if ftype == "select" and options:
+            elements.append(
+                {
+                    "tag": "select_static",
+                    "name": name,
+                    "title": {"tag": "plain_text", "content": label[:40]},
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "请选择",
+                    },
+                    "options": [
+                        {
+                            "text": {
+                                "tag": "plain_text",
+                                "content": str(
+                                    o.get("label") or o.get("id") or "",
+                                )[:40],
+                            },
+                            "value": str(o.get("id") or ""),
+                        }
+                        for o in options
+                        if isinstance(o, dict) and o.get("id")
+                    ],
+                },
+            )
+        else:
+            elements.append(
+                {
+                    "tag": "input",
+                    "name": name,
+                    "title": {"tag": "plain_text", "content": label[:40]},
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "请输入",
+                    },
+                },
+            )
+    elements.append(
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "提交"},
+                    "type": "primary",
+                    "value": {**base, "action": _ASK_FORM},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "取消"},
+                    "type": "default",
+                    "value": {**base, "action": _ASK_CANCEL},
+                },
+            ],
+        },
+    )
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "turquoise",
+            "title": {"tag": "plain_text", "content": "请填写"},
+        },
+        "elements": elements,
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _build_ask_user_file_card(
+    tool_call_id: str,
+    chat_id: str,
+    prompt: str,
+    accept: str = "",
+    agent_id: str = "",
+    session_id: str = "",
+) -> str:
+    """Build a Feishu card telling the user to send a file next."""
+    base = _ask_user_base(tool_call_id, chat_id, agent_id, session_id)
+    shown = prompt if len(prompt) <= 800 else prompt[:799] + "…"
+    extra = f"\n类型：`{accept}`" if accept else ""
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "请发送文件"},
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": shown + extra + "\n\n请在本对话中发送文件或图片。",
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "取消"},
+                        "type": "danger",
+                        "value": {**base, "action": _ASK_CANCEL},
+                    },
+                ],
+            },
+        ],
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _ask_user_resolved_card(cancelled: bool) -> dict:
+    """In-place replacement after the user answers or cancels."""
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "grey" if cancelled else "green",
+            "title": {
+                "tag": "plain_text",
+                "content": "已取消" if cancelled else "已提交",
+            },
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": "已取消。" if cancelled else "已收到你的回复。",
+            },
+        ],
+    }
+
+
+def _parse_ask_user_action(
+    value: Any,
+    form_value: Any = None,
+) -> tuple[str, str, str, str, dict[str, Any]] | None:
+    """Parse an ask_user card click.
+
+    Returns:
+        ``(tool_call_id, chat_id, agent_id, session_id, payload)`` or
+        ``None`` if this is not an ask_user button.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(value, dict) or value.get("type") != _ASK_USER_TYPE:
+        return None
+    tool_call_id = str(value.get("tool_call_id") or "").strip()
+    chat_id = str(value.get("chat_id") or "").strip()
+    if not tool_call_id:
+        return None
+    action = str(value.get("action") or "").strip().lower()
+    agent_id = str(value.get("agent_id") or "").strip()
+    session_id = str(value.get("session_id") or "").strip()
+    payload: dict[str, Any]
+    if action == _ASK_CANCEL:
+        payload = {"cancelled": True}
+    elif action == _ASK_CHOICE:
+        idx_raw = value.get("option_index")
+        try:
+            option_index = int(idx_raw) if idx_raw is not None else None
+        except (TypeError, ValueError):
+            option_index = None
+        payload = {
+            "kind": "choice",
+            "option_id": str(value.get("option_id") or ""),
+            "option_index": option_index,
+        }
+    elif action == _ASK_FORM:
+        payload = {
+            "kind": "form",
+            "values": _flatten_form_value(form_value),
+        }
+    else:
+        return None
+    return tool_call_id, chat_id, agent_id, session_id, payload
+
+
+def _flatten_form_value(form_value: Any) -> dict[str, Any]:
+    """Normalise Feishu ``form_value`` into a plain string map."""
+    data = _as_mapping(form_value)
+    out: dict[str, Any] = {}
+    for key, raw in data.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        if isinstance(raw, dict):
+            if "value" in raw:
+                out[name] = raw.get("value")
+            elif "option" in raw:
+                out[name] = raw.get("option")
+            else:
+                out[name] = raw
+        else:
+            out[name] = raw
+    return out
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    dump = getattr(value, "model_dump", None) or getattr(value, "dict", None)
+    if callable(dump):
+        try:
+            data = dump()
+        except TypeError:
+            data = None
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _build_ask_user_action_response(cancelled: bool) -> Any:
+    """Toast + in-place card update for an ask_user click."""
+    return _wrap_response(
+        {
+            "toast": {
+                "type": "info" if cancelled else "success",
+                "content": "已取消" if cancelled else "已提交",
+            },
+            "card": {
+                "type": "raw",
+                "data": _ask_user_resolved_card(cancelled),
+            },
+        },
+    )
