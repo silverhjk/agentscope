@@ -236,6 +236,26 @@ def _ask_user_base(
     }
 
 
+def _build_process_progress_card(progress: dict[str, Any]) -> str:
+    """Informational Feishu card: stages + current tasks, no buttons."""
+    from ..._process_progress import format_progress_markdown
+
+    md = format_progress_markdown(progress)
+    shown = md if len(md) <= 4000 else md[:3999] + "…"
+    title = str(progress.get("process_name") or "流程进度")
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"流程进度 · {title}"[:40]},
+        },
+        "elements": [
+            {"tag": "markdown", "content": shown},
+        ],
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
 def _build_ask_user_choice_card(
     tool_call_id: str,
     chat_id: str,

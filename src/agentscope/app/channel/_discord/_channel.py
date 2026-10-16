@@ -14,7 +14,7 @@ needs shard coordination, which is out of scope here.
 import asyncio
 import base64
 import io
-from typing import AsyncIterator, Awaitable, Callable, TYPE_CHECKING
+from typing import Any, AsyncIterator, Awaitable, Callable, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,10 @@ from ....event import (
     RequireUserConfirmEvent,
 )
 from ..._ask_user import prompt_fallback_text, spec_from_tool_call
+from ..._process_progress import (
+    format_progress_markdown,
+    progress_cards_from_msg,
+)
 from ....message import Base64Source, DataBlock, Msg, TextBlock
 from .._base import (
     ChannelBase,
@@ -360,6 +364,8 @@ class DiscordChannel(ChannelBase):
                         filename=block.name or "attachment",
                     ),
                 )
+        for progress in progress_cards_from_msg(reply):
+            await self._present_process_progress(event, progress)
         if confirm is not None:
             await self._present_confirm(event, confirm)
         if external is not None:
@@ -373,6 +379,19 @@ class DiscordChannel(ChannelBase):
                 for part in self._split_long_message(text):
                     if part:
                         await channel.send(part)
+
+    async def _present_process_progress(
+        self,
+        event: ChannelEvent,
+        progress: dict[str, Any],
+    ) -> None:
+        """Post process-progress markdown (Discord has no native step card)."""
+        channel = await self._channel(event.chat_id)
+        if channel is None:
+            return
+        for part in self._split_long_message(format_progress_markdown(progress)):
+            if part:
+                await channel.send(part)
 
     async def _present_confirm(
         self,

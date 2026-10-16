@@ -294,6 +294,21 @@ class _AskUserDecision:
     option_index: int | None = None
 
 
+def _process_progress_card_data(progress: dict[str, Any]) -> dict[str, str]:
+    """Informational AI-card map (no buttons). Nested lists, no GFM tables."""
+    from ..._process_progress import format_progress_markdown
+
+    md = format_progress_markdown(progress)
+    shown = md.encode("utf-8")[:_PARAM_VALUE_BUDGET].decode("utf-8", "ignore")
+    title = str(progress.get("process_name") or "流程进度")[:40]
+    return {
+        "msgTitle": f"流程进度 · {title}"[:40],
+        "staticMsgContent": shown,
+        "sys_full_json_obj": _SETTLED_LAYOUT,
+        "status": "done",
+    }
+
+
 def _ask_user_choice_card_data(
     prompt: str,
     options: list[tuple[str, str]],

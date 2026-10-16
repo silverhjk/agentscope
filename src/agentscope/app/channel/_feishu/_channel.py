@@ -45,9 +45,14 @@ from ._card_templates import (
     _build_ask_user_choice_card,
     _build_ask_user_file_card,
     _build_ask_user_form_card,
+    _build_process_progress_card,
     _build_toast,
     _parse_action,
     _parse_ask_user_action,
+)
+from ..._process_progress import (
+    format_progress_markdown,
+    progress_cards_from_msg,
 )
 from ..._ask_user import (
     ASK_USER_TOOL_NAME,
@@ -798,6 +803,8 @@ class FeishuChannel(ChannelBase):
                         data_bytes,
                         block.name or "file",
                     )
+        for progress in progress_cards_from_msg(reply):
+            await self._present_process_progress(event, progress)
         if confirm is not None:
             await self._present_confirm(event, confirm)
         if external is not None:
@@ -936,6 +943,30 @@ class FeishuChannel(ChannelBase):
                     str(tool.input)[:800],
                     event.metadata.get("agent_id", ""),
                     event.metadata.get("session_id", ""),
+                ),
+            )
+
+    async def _present_process_progress(
+        self,
+        event: ChannelEvent,
+        progress: dict[str, Any],
+    ) -> None:
+        """Post an informational process-progress card (does not park)."""
+        card = _build_process_progress_card(progress)
+        sent = await self._send(
+            event.channel_message_id,
+            event.chat_id,
+            "interactive",
+            card,
+        )
+        if not sent:
+            await self._send(
+                event.channel_message_id,
+                event.chat_id,
+                "text",
+                json.dumps(
+                    {"text": format_progress_markdown(progress)},
+                    ensure_ascii=False,
                 ),
             )
 

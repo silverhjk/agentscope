@@ -47,8 +47,13 @@ from ._card import (
     _ask_user_resolved_card_data,
     _parse_ask_user_callback,
     _parse_card_callback,
+    _process_progress_card_data,
     _resolved_card_data,
     _tracking_id,
+)
+from ..._process_progress import (
+    format_progress_markdown,
+    progress_cards_from_msg,
 )
 from ..._ask_user import (
     ASK_USER_TOOL_NAME,
@@ -427,6 +432,8 @@ class DingTalkChannel(ChannelBase):
                         await self._api().send_text(event.chat_id, part)
             elif isinstance(block, DataBlock):
                 await self._send_data(event.chat_id, block)
+        for progress in progress_cards_from_msg(reply):
+            await self._present_process_progress(event, progress)
         if confirm is not None:
             await self._present_confirm(
                 event,
@@ -906,6 +913,24 @@ class DingTalkChannel(ChannelBase):
                     event.chat_id,
                     "工具审批卡片投放失败，请管理员检查卡片模板与应用权限。",
                 )
+
+    async def _present_process_progress(
+        self,
+        event: ChannelEvent,
+        progress: dict[str, Any],
+    ) -> None:
+        """Post an informational process-progress card (does not park)."""
+        template_id = self._config.approval_card_template_id
+        if template_id:
+            out_track_id = await self._api().create_approval_card(
+                event.chat_id,
+                "",
+                template_id,
+                _process_progress_card_data(progress),
+            )
+            if out_track_id is not None:
+                return
+        await self._api().send_text(event.chat_id, format_progress_markdown(progress))
 
     async def _present_ask_user(
         self,
