@@ -32,6 +32,14 @@ class ChatModelConfig(BaseModel):
     parameters: dict
     """The model parameters."""
 
+    # From publish: platform model capability chat_vision on the chat model.
+    supports_multimodal: bool = False
+    """Whether the chat model accepts image / multimodal user parts.
+
+    Set explicitly when publishing (platform model flag). Runtime must not
+    infer this from the model name.
+    """
+
 
 class TTSModelConfig(BaseModel):
     """The TTS model configuration class."""

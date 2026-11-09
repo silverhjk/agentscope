@@ -604,12 +604,24 @@ class ChatService:
         if await self._message_bus.is_locked(
             MessageBusKeys.session_lock(session_id),
         ):
+            logger.info(
+                "user interrupt (running) session=%s agent=%s user=%s",
+                session_id,
+                agent_id,
+                user_id,
+            )
             await self._message_bus.publish(
                 MessageBusKeys.session_interrupt_channel(),
                 {"session_id": session_id},
             )
             return
 
+        logger.info(
+            "user interrupt (parked/idle) session=%s agent=%s user=%s",
+            session_id,
+            agent_id,
+            user_id,
+        )
         await enqueue_run_trigger(
             self._message_bus,
             user_id=user_id,

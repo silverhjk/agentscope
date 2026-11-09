@@ -57,6 +57,13 @@ async def get_model(
         parameters=parameters,
         stream=True,
     )
+    # Platform-published flag for dirty-session image keep/strip (not a
+    # provider API parameter).
+    setattr(
+        model,
+        "supports_multimodal",
+        bool(getattr(config, "supports_multimodal", False)),
+    )
 
     # Override the formatter's input types with the built-in model card's
     # when one matches; custom models have no card, so keep the default.
